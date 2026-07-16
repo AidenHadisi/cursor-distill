@@ -75,33 +75,26 @@ export async function runExtraction(
       const logPath = join(runDir, `extract-${index}.log`);
       const prompt = buildExtractPrompt(userPrompt, chunk);
 
-      console.log(
-        `  [${index + 1}/${chunks.length}] ${chunk.project} (${chunk.messageCount} messages)...`,
-      );
+      const name = truncateProject(chunk.project);
+      console.log(`  [started] ${name} (${chunk.messageCount} messages)`);
       const start = Date.now();
       const result = await spawnAgent(prompt, model, logPath);
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
       if (!result.success) {
-        console.warn(
-          `  [${index + 1}/${chunks.length}] FAILED (${elapsed}s): ${result.error} — skipped`,
-        );
+        console.warn(`  [failed]  ${name} — ${result.error} (${elapsed}s)`);
         continue;
       }
 
       const parsed = extractJson(result.stdout);
       if (parsed === null) {
-        console.warn(
-          `  [${index + 1}/${chunks.length}] no valid JSON (${elapsed}s) — skipped`,
-        );
+        console.warn(`  [failed]  ${name} — no valid JSON (${elapsed}s)`);
         continue;
       }
 
       const valid = validateObservations(parsed, chunk.project);
       observations.push(...valid);
-      console.log(
-        `  [${index + 1}/${chunks.length}] done (${elapsed}s): ${valid.length} observation(s)`,
-      );
+      console.log(`  [done]    ${name} → ${valid.length} observation(s) (${elapsed}s)`);
     }
   }
 
@@ -339,6 +332,14 @@ ${JSON.stringify(observations, null, 2)}`;
 
 /**
  * Extracts the first valid JSON array from the agent's stdout.
+ * Shortens a project slug like "Users-aidenhadisi-ezoicgit-funneljam" to "funneljam".
+ */
+function truncateProject(slug: string): string {
+  const parts = slug.split("-");
+  return parts.length > 2 ? parts.slice(2).join("-") : slug;
+}
+
+/**
  * Handles cases where the agent wraps JSON in markdown code fences or adds prose.
  */
 function extractJson(stdout: string): unknown[] | null {
