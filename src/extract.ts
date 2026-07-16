@@ -36,12 +36,11 @@ export interface DigestResult {
   projectCounts: Record<string, number>;
 }
 
-/** The final digest ready to feed into the headless agent. */
-export interface DigestOutput {
-  digest: string;
-  totalMessages: number;
-  projectCounts: Record<string, number>;
-  newWatermarks: Record<string, number>;
+/** A batch of deduplicated messages from one project, sized for one extraction call. */
+export interface Chunk {
+  project: string;
+  text: string;
+  messageCount: number;
 }
 
 interface TranscriptLine {
@@ -132,15 +131,17 @@ export async function extractTranscripts(
 
 /**
  * Deduplicates messages by content hash, groups them by project, and
- * truncates the result to fit within maxChars.
+ * splits each project's messages into chunks of at most maxWordsPerChunk.
+ * Nothing is truncated — a large project simply produces multiple chunks.
+ * Word count is used instead of character count because it's a much better
+ * proxy for tokens (~1.3 tokens per word for mixed English/code).
  */
-export function buildDigest(
+export function buildChunks(
   result: DigestResult,
-  maxChars: number = 100_000,
-): DigestOutput {
+  maxWordsPerChunk: number = 100_000,
+): Chunk[] {
   const seen = new Set<string>();
   const byProject: Record<string, string[]> = {};
-  let totalMessages = 0;
 
   const sorted = [...result.messages].sort(
     (a, b) => b.timestampMs - a.timestampMs,
@@ -154,33 +155,41 @@ export function buildDigest(
 
     if (!byProject[msg.project]) byProject[msg.project] = [];
     byProject[msg.project].push(msg.text);
-    totalMessages++;
   }
 
-  const sections: string[] = [];
-  let totalLen = 0;
+  const chunks: Chunk[] = [];
 
   for (const [project, msgs] of Object.entries(byProject)) {
-    const header = `\n## Project: ${project} (${msgs.length} messages)\n`;
-    let section = header;
+    let text = "";
+    let wordCount = 0;
+    let count = 0;
 
     for (const m of msgs) {
-      const entry = `\n- ${m.replace(/\n/g, "\n  ")}\n`;
-      if (totalLen + section.length + entry.length > maxChars) break;
-      section += entry;
+      const entry = `- ${m.replace(/\n/g, "\n  ")}\n\n`;
+      const entryWords = countWords(entry);
+
+      if (wordCount + entryWords > maxWordsPerChunk && count > 0) {
+        chunks.push({ project, text, messageCount: count });
+        text = "";
+        wordCount = 0;
+        count = 0;
+      }
+
+      text += entry;
+      wordCount += entryWords;
+      count++;
     }
 
-    sections.push(section);
-    totalLen += section.length;
-    if (totalLen >= maxChars) break;
+    if (count > 0) {
+      chunks.push({ project, text, messageCount: count });
+    }
   }
 
-  return {
-    digest: sections.join("\n"),
-    totalMessages,
-    projectCounts: result.projectCounts,
-    newWatermarks: result.newWatermarks,
-  };
+  return chunks;
+}
+
+function countWords(text: string): number {
+  return text.split(/\s+/).filter(Boolean).length;
 }
 
 /** Concatenates text content blocks from a parsed transcript line. */

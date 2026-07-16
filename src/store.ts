@@ -7,10 +7,13 @@ const DATA_DIR = join(homedir(), ".cursor-distill");
 
 export interface Config {
   interval: string;
-  model?: string;
+  extractModel: string;
+  synthesizeModel: string;
   createdAt: string;
-  promptHash?: string;
 }
+
+/** The two user-editable prompt files under ~/.cursor-distill/prompts/. */
+export type PromptName = "extract" | "synthesize";
 
 /** Per-project watermarks tracking the last processed transcript mtime. */
 export interface WatermarkState {
@@ -35,9 +38,10 @@ export function dataDir(): string {
   return DATA_DIR;
 }
 
-/** Creates the data directory and runs/ subfolder if missing. */
+/** Creates the data directory and its subfolders if missing. */
 export async function ensureDataDir(): Promise<void> {
   await mkdir(join(DATA_DIR, "runs"), { recursive: true });
+  await mkdir(join(DATA_DIR, "prompts"), { recursive: true });
 }
 
 export async function readConfig(): Promise<Config | null> {
@@ -85,15 +89,20 @@ export async function appendLedger(entries: LedgerEntry[]): Promise<void> {
   );
 }
 
-export async function readPrompt(): Promise<string | null> {
-  const p = join(DATA_DIR, "prompt.md");
+/** Reads a user-editable prompt file, or null if it doesn't exist. */
+export async function readPromptFile(name: PromptName): Promise<string | null> {
+  const p = join(DATA_DIR, "prompts", `${name}.md`);
   if (!existsSync(p)) return null;
   return readFile(p, "utf-8");
 }
 
-export async function writePrompt(content: string): Promise<void> {
+/** Writes a user-editable prompt file. */
+export async function writePromptFile(
+  name: PromptName,
+  content: string,
+): Promise<void> {
   await ensureDataDir();
-  await writeFile(join(DATA_DIR, "prompt.md"), content);
+  await writeFile(join(DATA_DIR, "prompts", `${name}.md`), content);
 }
 
 /** Parses a human-friendly interval like "7d", "12h", "30m" into milliseconds. */

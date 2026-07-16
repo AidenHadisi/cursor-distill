@@ -16,7 +16,8 @@ export async function statusCommand(): Promise<void> {
   console.log(`\ncursor-distill status\n${"=".repeat(40)}\n`);
 
   console.log(`Interval: ${config.interval}`);
-  console.log(`Model: ${config.model ?? "(default)"}`);
+  console.log(`Extract model: ${config.extractModel}`);
+  console.log(`Synthesize model: ${config.synthesizeModel}`);
   console.log(`Initialized: ${config.createdAt}`);
 
   const scheduled = isScheduleInstalled();

@@ -20,7 +20,16 @@ program
   .command("init")
   .description("Set up cursor-distill with a schedule")
   .option("--interval <duration>", "run interval (e.g. 7d, 3d, 1d)", "7d")
-  .option("--model <slug>", "model to use for the headless agent", "claude-opus-4-8-thinking")
+  .option(
+    "--extract-model <slug>",
+    "fast model for pattern extraction",
+    "gemini-3.5-flash",
+  )
+  .option(
+    "--synthesize-model <slug>",
+    "smart model for artifact synthesis",
+    "claude-opus-4-8-thinking-high",
+  )
   .action(initCommand);
 
 program

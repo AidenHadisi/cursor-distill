@@ -1,20 +1,23 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   readConfig,
   readState,
   writeState,
   appendLedger,
   intervalToMs,
+  dataDir,
   type LedgerEntry,
 } from "../store.js";
-import { extractTranscripts, buildDigest } from "../extract.js";
-import { invokeAgent, type AgentEntry } from "../agent.js";
+import { extractTranscripts, buildChunks } from "../extract.js";
+import { runExtraction, runSynthesis, type AgentEntry } from "../agent.js";
 
 /**
- * The main pipeline: extract transcripts, build a digest, invoke the
- * headless agent, validate its response, write files, and record results.
+ * The main pipeline: extract transcripts, chunk them per project, run the
+ * extraction model over each chunk in parallel, synthesize artifacts with
+ * the smart model, validate, write files, and record results.
  * Exits silently when the configured interval hasn't elapsed yet (unless --now).
  */
 export async function runCommand(opts: { now?: boolean }): Promise<void> {
@@ -40,47 +43,61 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
     return;
   }
 
+  const chunks = buildChunks(result);
   console.log(
-    `Found ${result.messages.length} user messages across ${Object.keys(result.projectCounts).length} projects.`,
+    `Found ${result.messages.length} user messages -> ${chunks.length} chunk(s) across ${Object.keys(result.projectCounts).length} projects.`,
   );
 
-  const digest = buildDigest(result);
-  console.log(
-    `Digest: ${digest.totalMessages} deduplicated messages (${digest.digest.length} chars).`,
+  const runId = randomUUID().slice(0, 8);
+  const runDir = join(dataDir(), "runs", runId);
+  await mkdir(runDir, { recursive: true });
+
+  console.log(`\nStage 1: extracting patterns (${config.extractModel})...`);
+  const observations = await runExtraction(chunks, config.extractModel, runDir);
+  console.log(`Extraction complete: ${observations.length} observation(s).`);
+
+  if (observations.length === 0) {
+    await writeState({
+      projects: result.newWatermarks,
+      lastRunAt: new Date().toISOString(),
+    });
+    console.log(`\nRun ${runId} complete. No patterns found.`);
+    return;
+  }
+
+  console.log(`\nStage 2: synthesizing artifacts (${config.synthesizeModel})...`);
+  const synthesis = await runSynthesis(
+    observations,
+    config.synthesizeModel,
+    runDir,
   );
 
-  console.log("Invoking headless agent...");
-  const runResult = await invokeAgent(digest, config.model);
-
-  if (!runResult.success) {
-    console.error(`Agent run failed: ${runResult.error}`);
-    console.error(
-      `Log: ~/.cursor-distill/runs/${runResult.runId}/agent.log`,
-    );
+  if (!synthesis.success) {
+    console.error(`Synthesis failed: ${synthesis.error}`);
+    console.error(`Logs: ~/.cursor-distill/runs/${runId}/`);
     process.exit(1);
   }
 
-  if (runResult.entries.length > 0) {
-    const written = await writeArtifacts(runResult.entries);
-    const ledgerEntries = toLedgerEntries(written, runResult.runId);
-    await appendLedger(ledgerEntries);
+  if (synthesis.entries.length > 0) {
+    const written = await writeArtifacts(synthesis.entries);
+    await appendLedger(toLedgerEntries(written, runId));
   }
 
   await writeState({
-    projects: digest.newWatermarks,
+    projects: result.newWatermarks,
     lastRunAt: new Date().toISOString(),
   });
 
-  console.log(`\nRun ${runResult.runId} complete.`);
-  if (runResult.entries.length === 0) {
+  console.log(`\nRun ${runId} complete.`);
+  if (synthesis.entries.length === 0) {
     console.log("No new artifacts created.");
   } else {
-    console.log(`Wrote ${runResult.entries.length} artifact(s):`);
-    for (const e of runResult.entries) {
+    console.log(`Wrote ${synthesis.entries.length} artifact(s):`);
+    for (const e of synthesis.entries) {
       console.log(`  ${e.action} ${e.type} (${e.scope}): ${e.path}`);
     }
   }
-  console.log(`Log: ~/.cursor-distill/runs/${runResult.runId}/`);
+  console.log(`Logs: ~/.cursor-distill/runs/${runId}/`);
 }
 
 /** Returns true if enough time has passed since the last successful run. */

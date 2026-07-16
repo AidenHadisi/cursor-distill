@@ -4,20 +4,25 @@ import {
   ensureDataDir,
   readConfig,
   writeConfig,
-  readPrompt,
-  writePrompt,
+  readPromptFile,
+  writePromptFile,
   intervalToMs,
   type Config,
+  type PromptName,
 } from "../store.js";
-import { DEFAULT_PROMPT } from "../defaultPrompt.js";
+import {
+  DEFAULT_EXTRACT_PROMPT,
+  DEFAULT_SYNTHESIZE_PROMPT,
+} from "../defaultPrompts.js";
 import { installSchedule } from "../scheduler.js";
 
 const AGENT_CANDIDATES = ["agent", "cursor-agent"];
 
-/** Sets up ~/.cursor-distill/, writes the default prompt, and registers the cron schedule. */
+/** Sets up ~/.cursor-distill/, writes the default prompts, and registers the cron schedule. */
 export async function initCommand(opts: {
   interval: string;
-  model?: string;
+  extractModel: string;
+  synthesizeModel: string;
 }): Promise<void> {
   try {
     intervalToMs(opts.interval);
@@ -38,18 +43,19 @@ export async function initCommand(opts: {
   console.log(`  Cursor CLI found at ${agentPath}`);
 
   await ensureDataDir();
-  await syncPrompt();
+  await syncPrompt("extract", DEFAULT_EXTRACT_PROMPT);
+  await syncPrompt("synthesize", DEFAULT_SYNTHESIZE_PROMPT);
 
   const existing = await readConfig();
   const config: Config = {
     interval: opts.interval,
-    model: opts.model ?? existing?.model,
+    extractModel: opts.extractModel,
+    synthesizeModel: opts.synthesizeModel,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
-    promptHash: createHash("sha256").update(DEFAULT_PROMPT).digest("hex"),
   };
   await writeConfig(config);
   console.log(
-    `  Config saved (interval: ${opts.interval}, model: ${opts.model ?? "default"})`,
+    `  Config saved (interval: ${opts.interval}, extract: ${opts.extractModel}, synthesize: ${opts.synthesizeModel})`,
   );
 
   try {
@@ -67,7 +73,7 @@ export async function initCommand(opts: {
       opts.interval +
       ".",
   );
-  console.log("Edit the rubric prompt at ~/.cursor-distill/prompt.md");
+  console.log("Edit the prompts at ~/.cursor-distill/prompts/");
   console.log("View status: cursor-distill status");
   console.log("Run now: cursor-distill run --now");
 }
@@ -88,26 +94,27 @@ function findAgentCli(): string | null {
  * Writes the default prompt on first run. On subsequent runs it only
  * overwrites if the user hasn't customized the file.
  */
-async function syncPrompt(): Promise<void> {
-  const existingPrompt = await readPrompt();
-  const defaultHash = createHash("sha256")
-    .update(DEFAULT_PROMPT)
-    .digest("hex");
+async function syncPrompt(
+  name: PromptName,
+  defaultContent: string,
+): Promise<void> {
+  const existing = await readPromptFile(name);
 
-  if (!existingPrompt) {
-    await writePrompt(DEFAULT_PROMPT);
-    console.log("  Default prompt written to ~/.cursor-distill/prompt.md");
+  if (!existing) {
+    await writePromptFile(name, defaultContent);
+    console.log(
+      `  Default prompt written to ~/.cursor-distill/prompts/${name}.md`,
+    );
     return;
   }
 
-  const existingHash = createHash("sha256")
-    .update(existingPrompt)
-    .digest("hex");
+  const existingHash = createHash("sha256").update(existing).digest("hex");
+  const defaultHash = createHash("sha256").update(defaultContent).digest("hex");
   if (existingHash === defaultHash) {
-    await writePrompt(DEFAULT_PROMPT);
+    await writePromptFile(name, defaultContent);
   } else {
     console.log(
-      "  Custom prompt.md preserved (edit ~/.cursor-distill/prompt.md to customize)",
+      `  Custom prompts/${name}.md preserved (edit to customize)`,
     );
   }
 }

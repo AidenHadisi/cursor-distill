@@ -1,19 +1,37 @@
 import { spawn, execSync } from "node:child_process";
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import { readPrompt, readLedger, dataDir, type LedgerEntry } from "./store.js";
-import { DEFAULT_PROMPT } from "./defaultPrompt.js";
-import type { DigestOutput } from "./extract.js";
+import { readPromptFile, readLedger } from "./store.js";
+import {
+  DEFAULT_EXTRACT_PROMPT,
+  DEFAULT_SYNTHESIZE_PROMPT,
+} from "./defaultPrompts.js";
+import type { Chunk } from "./extract.js";
 
 const AGENT_CANDIDATES = ["agent", "cursor-agent"];
+
+/** How many extraction agents run at once. */
+const EXTRACT_CONCURRENCY = 4;
 
 const VALID_TYPES = new Set(["rule", "skill", "subagent"]);
 const VALID_SCOPES = new Set(["global", "project"]);
 const VALID_ACTIONS = new Set(["created", "edited"]);
 
-/** A single artifact proposed by the agent, including file content. */
+const VALID_INVOCATIONS = new Set(["user", "agent"]);
+const VALID_CONFIDENCES = new Set(["high", "medium"]);
+
+/** A piece of reusable knowledge extracted from one chunk of messages. */
+export interface Observation {
+  insight: string;
+  typeGuess: "rule" | "skill" | "subagent";
+  invocation: "user" | "agent";
+  confidence: "high" | "medium";
+  project: string;
+  evidence: string[];
+}
+
+/** A single artifact proposed by the synthesis stage, including file content. */
 export interface AgentEntry {
   type: "rule" | "skill" | "subagent";
   scope: "global" | "project";
@@ -23,46 +41,149 @@ export interface AgentEntry {
   sourcePattern: string;
 }
 
-/** Outcome of a single headless agent invocation. */
-export interface RunResult {
-  runId: string;
+/** Outcome of the synthesis stage. */
+export interface SynthesisResult {
   entries: AgentEntry[];
-  agentLog: string;
+  success: boolean;
+  error?: string;
+}
+
+interface SpawnResult {
+  stdout: string;
   success: boolean;
   error?: string;
 }
 
 /**
- * Spawns the Cursor CLI headlessly with the digest and rubric prompt.
- * The agent returns structured JSON to stdout — it does NOT write any files.
- * We parse, validate, and return the entries for the caller to write.
+ * Stage 1: runs the extraction model over every chunk with bounded
+ * concurrency. Failed or unparseable chunks are skipped with a warning —
+ * extraction is lossy by design; synthesis is where strictness matters.
  */
-export async function invokeAgent(
-  digest: DigestOutput,
-  model?: string,
-): Promise<RunResult> {
-  const runId = randomUUID().slice(0, 8);
-  const runDir = join(dataDir(), "runs", runId);
-  await mkdir(runDir, { recursive: true });
+export async function runExtraction(
+  chunks: Chunk[],
+  model: string,
+  runDir: string,
+): Promise<Observation[]> {
+  const userPrompt = (await readPromptFile("extract")) ?? DEFAULT_EXTRACT_PROMPT;
+  const observations: Observation[] = [];
+  let nextIndex = 0;
 
-  const fullPrompt = await buildPrompt(digest);
-  await writeFile(join(runDir, "prompt.txt"), fullPrompt);
+  async function worker(): Promise<void> {
+    while (nextIndex < chunks.length) {
+      const index = nextIndex++;
+      const chunk = chunks[index];
+      const logPath = join(runDir, `extract-${index}.log`);
+      const prompt = buildExtractPrompt(userPrompt, chunk);
 
-  const agentCmd = findAgent();
-  const args = ["-p", fullPrompt, "--mode", "ask"];
-  if (model) {
-    args.push("--model", model);
+      const result = await spawnAgent(prompt, model, logPath);
+      if (!result.success) {
+        console.warn(
+          `  Chunk ${index} (${chunk.project}) failed: ${result.error} — skipped`,
+        );
+        continue;
+      }
+
+      const parsed = extractJson(result.stdout);
+      if (parsed === null) {
+        console.warn(
+          `  Chunk ${index} (${chunk.project}) returned no valid JSON — skipped`,
+        );
+        continue;
+      }
+
+      const valid = validateObservations(parsed, chunk.project);
+      observations.push(...valid);
+      console.log(
+        `  Chunk ${index} (${chunk.project}): ${valid.length} observation(s)`,
+      );
+    }
   }
 
-  return new Promise<RunResult>((resolve) => {
+  const workers = Array.from(
+    { length: Math.min(EXTRACT_CONCURRENCY, chunks.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+
+  await writeFile(
+    join(runDir, "observations.json"),
+    JSON.stringify(observations, null, 2),
+  );
+
+  return observations;
+}
+
+/**
+ * Stage 2: runs the synthesis model once over all observations.
+ * Validation is strict — any invalid entry aborts the run with no writes.
+ */
+export async function runSynthesis(
+  observations: Observation[],
+  model: string,
+  runDir: string,
+): Promise<SynthesisResult> {
+  const userPrompt =
+    (await readPromptFile("synthesize")) ?? DEFAULT_SYNTHESIZE_PROMPT;
+  const prompt = await buildSynthesizePrompt(userPrompt, observations);
+  await writeFile(join(runDir, "synthesize-prompt.txt"), prompt);
+
+  const result = await spawnAgent(prompt, model, join(runDir, "synthesize.log"));
+  if (!result.success) {
+    return { entries: [], success: false, error: result.error };
+  }
+
+  const parsed = extractJson(result.stdout);
+  if (parsed === null) {
+    return {
+      entries: [],
+      success: false,
+      error: "No valid JSON array found in synthesis output",
+    };
+  }
+
+  const validated = validateEntries(parsed);
+  if (validated === null) {
+    return {
+      entries: [],
+      success: false,
+      error: "Synthesis returned entries with missing or invalid fields",
+    };
+  }
+
+  await writeFile(
+    join(runDir, "response.json"),
+    JSON.stringify(validated, null, 2),
+  );
+  return { entries: validated, success: true };
+}
+
+/**
+ * Spawns the Cursor CLI headlessly in read-only mode, writing the prompt
+ * to stdin (argv has a 128KB per-argument limit on Linux/WSL2).
+ */
+function spawnAgent(
+  prompt: string,
+  model: string,
+  logPath: string,
+): Promise<SpawnResult> {
+  const agentCmd = findAgent();
+  const args = ["-p", "--mode", "ask", "--model", model];
+
+  return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
     let stderr = "";
 
     const proc = spawn(agentCmd, args, {
       cwd: homedir(),
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
     });
+
+    proc.stdin.on("error", () => {
+      // Child exited before reading all input; close handler reports it.
+    });
+    proc.stdin.write(prompt);
+    proc.stdin.end();
 
     proc.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -73,58 +194,23 @@ export async function invokeAgent(
     });
 
     proc.on("close", async (code) => {
-      const agentLog = `EXIT CODE: ${code}\n\n--- STDOUT ---\n${stdout}\n\n--- STDERR ---\n${stderr}`;
-      await writeFile(join(runDir, "agent.log"), agentLog);
+      const log = `EXIT CODE: ${code}\n\n--- STDOUT ---\n${stdout}\n\n--- STDERR ---\n${stderr}`;
+      await writeFile(logPath, log);
 
       if (code !== 0) {
         resolve({
-          runId,
-          entries: [],
-          agentLog,
+          stdout,
           success: false,
           error: `Agent exited with code ${code}`,
         });
         return;
       }
-
-      const parsed = extractJson(stdout);
-      if (parsed === null) {
-        resolve({
-          runId,
-          entries: [],
-          agentLog,
-          success: false,
-          error: "No valid JSON array found in agent stdout",
-        });
-        return;
-      }
-
-      const validated = validateEntries(parsed);
-      if (validated === null) {
-        resolve({
-          runId,
-          entries: [],
-          agentLog,
-          success: false,
-          error: "Agent returned entries with missing or invalid fields",
-        });
-        return;
-      }
-
-      await writeFile(join(runDir, "response.json"), JSON.stringify(validated, null, 2));
-      resolve({ runId, entries: validated, agentLog, success: true });
+      resolve({ stdout, success: true });
     });
 
     proc.on("error", async (err) => {
-      const agentLog = `SPAWN ERROR: ${err.message}`;
-      await writeFile(join(runDir, "agent.log"), agentLog);
-      resolve({
-        runId,
-        entries: [],
-        agentLog,
-        success: false,
-        error: err.message,
-      });
+      await writeFile(logPath, `SPAWN ERROR: ${err.message}`);
+      resolve({ stdout: "", success: false, error: err.message });
     });
   });
 }
@@ -142,16 +228,60 @@ function findAgent(): string {
   return "agent";
 }
 
-/** Assembles the full prompt: user rubric + hardcoded mechanics + digest. */
-async function buildPrompt(digest: DigestOutput): Promise<string> {
-  const userPrompt = (await readPrompt()) ?? DEFAULT_PROMPT;
+/** Assembles the extraction prompt: user rubric + observation contract + chunk. */
+function buildExtractPrompt(userPrompt: string, chunk: Chunk): string {
+  const mechanics = `
+---
+## System Instructions (non-negotiable)
+
+**Do NOT write any files to disk.** Return your entire response as a single JSON array printed to stdout.
+
+Each element is one piece of reusable knowledge you identified:
+
+\`\`\`json
+[
+  {
+    "insight": "User debugs site assignment issues by checking the assignments table in MySQL, then tracing the code path in the sol repo's assignment handler",
+    "typeGuess": "skill",
+    "invocation": "user",
+    "confidence": "high",
+    "evidence": ["check the site_assignments table first", "look at sol/pkg/assignments/handler.go for the assignment logic"]
+  }
+]
+\`\`\`
+
+Required fields:
+- **insight**: what the user taught or demonstrated — a clear description of the knowledge
+- **typeGuess**: one of "rule", "skill", "subagent"
+- **invocation**: "user" (default — user triggers when needed) or "agent" (must always be in agent context, only for universal conventions)
+- **confidence**: "high" (clear intentional teaching moment or explicit declaration) or "medium" (reasonable inference from context)
+- **evidence**: 1-5 short excerpts from the user's actual messages showing the knowledge
+
+If no reusable knowledge is found, return an empty array: \`[]\`
+
+**Only output the JSON array. No prose before or after.**
+`;
+
+  return `${userPrompt}
+${mechanics}
+---
+# User Messages — Project: ${chunk.project} (${chunk.messageCount} messages)
+
+${chunk.text}`;
+}
+
+/** Assembles the synthesis prompt: user rubric + artifact contract + ledger + observations. */
+async function buildSynthesizePrompt(
+  userPrompt: string,
+  observations: Observation[],
+): Promise<string> {
   const ledger = await readLedger();
 
   const mechanics = `
 ---
 ## System Instructions (non-negotiable)
 
-**Do NOT write any files to disk.** Instead, return your entire response as a single JSON array printed to stdout.
+**Do NOT write any files to disk.** Return your entire response as a single JSON array printed to stdout.
 
 Each element in the array represents one artifact to create or edit:
 
@@ -163,7 +293,7 @@ Each element in the array represents one artifact to create or edit:
     "path": "~/.cursor/rules/example.mdc",
     "action": "created",
     "content": "---\\nalwaysApply: true\\n---\\n# Example\\n\\nConcise instruction.",
-    "sourcePattern": "User repeatedly asked for camelCase JSON"
+    "sourcePattern": "User demonstrated camelCase JSON preference across multiple projects"
   }
 ]
 \`\`\`
@@ -174,7 +304,7 @@ Required fields:
 - **path**: full file path (use ~ for home directory)
 - **action**: "created" or "edited"
 - **content**: the complete file contents to write
-- **sourcePattern**: short description of the repeated behavior that triggered this
+- **sourcePattern**: short description of the knowledge that triggered this artifact
 
 If nothing warrants creation, return an empty array: \`[]\`
 
@@ -184,25 +314,14 @@ Previously created artifacts (check before duplicating):
 ${JSON.stringify(ledger.map((e) => ({ type: e.type, scope: e.scope, path: e.path })), null, 2)}
 `;
 
-  const projectSummary = Object.entries(digest.projectCounts)
-    .sort(([, a], [, b]) => b - a)
-    .map(([p, c]) => `- ${p}: ${c}`)
-    .join("\n");
-
   return `${userPrompt}
-
 ${mechanics}
-
 ---
-# User Message Digest
+# Observations
 
-Summary: ${digest.totalMessages} deduplicated messages across ${Object.keys(digest.projectCounts).length} projects.
+${observations.length} observations extracted from per-project message batches. Each captures a piece of reusable knowledge the user demonstrated or declared. Merge observations that describe the same knowledge (they may be worded differently across projects). Use the "invocation" field to determine \`disable-model-invocation\` (skills) and \`alwaysApply\` (rules). Prefer "user" invocation for skills.
 
-Project message counts:
-${projectSummary}
-
-${digest.digest}
-`;
+${JSON.stringify(observations, null, 2)}`;
 }
 
 /**
@@ -242,6 +361,43 @@ function extractJson(stdout: string): unknown[] | null {
   }
 
   return null;
+}
+
+/**
+ * Validates observations leniently — invalid items are dropped, valid ones
+ * kept. The project field is stamped from the chunk, not trusted from the model.
+ */
+function validateObservations(raw: unknown[], project: string): Observation[] {
+  const valid: Observation[] = [];
+
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+
+    if (typeof o.insight !== "string" || o.insight.length === 0) continue;
+    if (typeof o.typeGuess !== "string" || !VALID_TYPES.has(o.typeGuess)) continue;
+    if (!Array.isArray(o.evidence)) continue;
+
+    const invocation =
+      typeof o.invocation === "string" && VALID_INVOCATIONS.has(o.invocation)
+        ? o.invocation
+        : "user";
+    const confidence =
+      typeof o.confidence === "string" && VALID_CONFIDENCES.has(o.confidence)
+        ? o.confidence
+        : "medium";
+
+    valid.push({
+      insight: o.insight,
+      typeGuess: o.typeGuess as Observation["typeGuess"],
+      invocation: invocation as Observation["invocation"],
+      confidence: confidence as Observation["confidence"],
+      project,
+      evidence: o.evidence.filter((e): e is string => typeof e === "string"),
+    });
+  }
+
+  return valid;
 }
 
 /** Validates that every entry has the required fields with correct types and values. */
