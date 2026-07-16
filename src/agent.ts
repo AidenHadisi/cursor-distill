@@ -167,7 +167,7 @@ function spawnAgent(
   logPath: string,
 ): Promise<SpawnResult> {
   const agentCmd = findAgent();
-  const args = ["-p", "--mode", "ask", "--model", model];
+  const args = ["-p", "--mode", "ask", "--trust", "--model", model];
 
   return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
