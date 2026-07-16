@@ -1,6 +1,5 @@
 import { spawn, execSync } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,10 +9,24 @@ import type { DigestOutput } from "./extract.js";
 
 const AGENT_CANDIDATES = ["agent", "cursor-agent"];
 
+const VALID_TYPES = new Set(["rule", "skill", "subagent"]);
+const VALID_SCOPES = new Set(["global", "project"]);
+const VALID_ACTIONS = new Set(["created", "edited"]);
+
+/** A single artifact proposed by the agent, including file content. */
+export interface AgentEntry {
+  type: "rule" | "skill" | "subagent";
+  scope: "global" | "project";
+  path: string;
+  action: "created" | "edited";
+  content: string;
+  sourcePattern: string;
+}
+
 /** Outcome of a single headless agent invocation. */
 export interface RunResult {
   runId: string;
-  entries: LedgerEntry[];
+  entries: AgentEntry[];
   agentLog: string;
   success: boolean;
   error?: string;
@@ -21,8 +34,8 @@ export interface RunResult {
 
 /**
  * Spawns the Cursor CLI headlessly with the digest and rubric prompt.
- * Returns the parsed manifest entries on success, or an error on failure.
- * All run artifacts (prompt, log, manifest) are persisted under runs/<runId>/.
+ * The agent returns structured JSON to stdout — it does NOT write any files.
+ * We parse, validate, and return the entries for the caller to write.
  */
 export async function invokeAgent(
   digest: DigestOutput,
@@ -32,8 +45,7 @@ export async function invokeAgent(
   const runDir = join(dataDir(), "runs", runId);
   await mkdir(runDir, { recursive: true });
 
-  const manifestPath = join(runDir, "manifest.json");
-  const fullPrompt = await buildPrompt(digest, manifestPath);
+  const fullPrompt = await buildPrompt(digest);
   await writeFile(join(runDir, "prompt.txt"), fullPrompt);
 
   const agentCmd = findAgent();
@@ -75,19 +87,32 @@ export async function invokeAgent(
         return;
       }
 
-      const entries = await parseManifest(manifestPath, runId);
-      if (entries === null) {
+      const parsed = extractJson(stdout);
+      if (parsed === null) {
         resolve({
           runId,
           entries: [],
           agentLog,
           success: false,
-          error: "Failed to parse manifest.json",
+          error: "No valid JSON array found in agent stdout",
         });
         return;
       }
 
-      resolve({ runId, entries, agentLog, success: true });
+      const validated = validateEntries(parsed);
+      if (validated === null) {
+        resolve({
+          runId,
+          entries: [],
+          agentLog,
+          success: false,
+          error: "Agent returned entries with missing or invalid fields",
+        });
+        return;
+      }
+
+      await writeFile(join(runDir, "response.json"), JSON.stringify(validated, null, 2));
+      resolve({ runId, entries: validated, agentLog, success: true });
     });
 
     proc.on("error", async (err) => {
@@ -117,27 +142,46 @@ function findAgent(): string {
   return "agent";
 }
 
-/** Assembles the full prompt: user rubric + mechanics + digest. */
-async function buildPrompt(
-  digest: DigestOutput,
-  manifestPath: string,
-): Promise<string> {
+/** Assembles the full prompt: user rubric + hardcoded mechanics + digest. */
+async function buildPrompt(digest: DigestOutput): Promise<string> {
   const userPrompt = (await readPrompt()) ?? DEFAULT_PROMPT;
   const ledger = await readLedger();
 
   const mechanics = `
 ---
-## Mechanics (non-negotiable, appended by cursor-distill)
+## System Instructions (non-negotiable)
 
-1. Check existing artifacts before creating. The current ledger of previously created artifacts:
+**Do NOT write any files to disk.** Instead, return your entire response as a single JSON array printed to stdout.
+
+Each element in the array represents one artifact to create or edit:
+
+\`\`\`json
+[
+  {
+    "type": "rule",
+    "scope": "global",
+    "path": "~/.cursor/rules/example.mdc",
+    "action": "created",
+    "content": "---\\nalwaysApply: true\\n---\\n# Example\\n\\nConcise instruction.",
+    "sourcePattern": "User repeatedly asked for camelCase JSON"
+  }
+]
+\`\`\`
+
+Required fields:
+- **type**: one of "rule", "skill", "subagent"
+- **scope**: one of "global", "project"
+- **path**: full file path (use ~ for home directory)
+- **action**: "created" or "edited"
+- **content**: the complete file contents to write
+- **sourcePattern**: short description of the repeated behavior that triggered this
+
+If nothing warrants creation, return an empty array: \`[]\`
+
+**Do not write any files yourself. Do not create directories. Only output the JSON array.**
+
+Previously created artifacts (check before duplicating):
 ${JSON.stringify(ledger.map((e) => ({ type: e.type, scope: e.scope, path: e.path })), null, 2)}
-
-2. Write artifacts directly to disk. Do not propose — write the files.
-
-3. When done, write the manifest to: ${manifestPath}
-   Format: JSON array of { type, scope, path, action, sourcePattern }
-
-4. If no patterns warrant new artifacts, write an empty array [] to the manifest.
 `;
 
   const projectSummary = Object.entries(digest.projectCounts)
@@ -161,29 +205,71 @@ ${digest.digest}
 `;
 }
 
-/** Reads and validates the manifest the agent was instructed to write. */
-async function parseManifest(
-  manifestPath: string,
-  runId: string,
-): Promise<LedgerEntry[] | null> {
-  if (!existsSync(manifestPath)) return [];
-
+/**
+ * Extracts the first valid JSON array from the agent's stdout.
+ * Handles cases where the agent wraps JSON in markdown code fences or adds prose.
+ */
+function extractJson(stdout: string): unknown[] | null {
+  // Try the whole string first
   try {
-    const raw = await readFile(manifestPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-
-    return parsed.map((e: Record<string, string>) => ({
-      runId,
-      date: new Date().toISOString(),
-      type: e.type as LedgerEntry["type"],
-      scope: e.scope as LedgerEntry["scope"],
-      project: e.project,
-      path: e.path,
-      action: e.action as LedgerEntry["action"],
-      sourcePattern: e.sourcePattern,
-    }));
+    const parsed = JSON.parse(stdout.trim());
+    if (Array.isArray(parsed)) return parsed;
   } catch {
-    return null;
+    // continue
   }
+
+  // Look for a JSON array in markdown code fences
+  const fenceMatch = stdout.match(/```(?:json)?\s*\n(\[[\s\S]*?\])\s*\n```/);
+  if (fenceMatch) {
+    try {
+      const parsed = JSON.parse(fenceMatch[1]);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // continue
+    }
+  }
+
+  // Look for the first [ ... ] block
+  const bracketStart = stdout.indexOf("[");
+  const bracketEnd = stdout.lastIndexOf("]");
+  if (bracketStart !== -1 && bracketEnd > bracketStart) {
+    try {
+      const parsed = JSON.parse(stdout.slice(bracketStart, bracketEnd + 1));
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // continue
+    }
+  }
+
+  return null;
+}
+
+/** Validates that every entry has the required fields with correct types and values. */
+function validateEntries(raw: unknown[]): AgentEntry[] | null {
+  if (raw.length === 0) return [];
+
+  const validated: AgentEntry[] = [];
+
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) return null;
+    const e = item as Record<string, unknown>;
+
+    if (typeof e.type !== "string" || !VALID_TYPES.has(e.type)) return null;
+    if (typeof e.scope !== "string" || !VALID_SCOPES.has(e.scope)) return null;
+    if (typeof e.action !== "string" || !VALID_ACTIONS.has(e.action)) return null;
+    if (typeof e.path !== "string" || e.path.length === 0) return null;
+    if (typeof e.content !== "string" || e.content.length === 0) return null;
+    if (typeof e.sourcePattern !== "string") return null;
+
+    validated.push({
+      type: e.type as AgentEntry["type"],
+      scope: e.scope as AgentEntry["scope"],
+      path: e.path,
+      action: e.action as AgentEntry["action"],
+      content: e.content,
+      sourcePattern: e.sourcePattern,
+    });
+  }
+
+  return validated;
 }

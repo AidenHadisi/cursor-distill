@@ -20,7 +20,7 @@ program
   .command("init")
   .description("Set up cursor-distill with a schedule")
   .option("--interval <duration>", "run interval (e.g. 7d, 3d, 1d)", "7d")
-  .option("--model <slug>", "model to use for the headless agent")
+  .option("--model <slug>", "model to use for the headless agent", "claude-opus-4-8-thinking")
   .action(initCommand);
 
 program

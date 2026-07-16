@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const MARKER = "# cursor-distill";
 
@@ -55,7 +56,8 @@ function setCrontab(content: string): void {
 }
 
 function buildCronLine(): string {
-  const cliPath = resolve(__dirname, "cli.js");
+  const currentDir = dirname(fileURLToPath(import.meta.url));
+  const cliPath = resolve(currentDir, "cli.js");
   const nodePath = process.execPath;
   return `0 * * * * ${nodePath} ${cliPath} run ${MARKER}`;
 }

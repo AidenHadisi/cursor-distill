@@ -1,17 +1,21 @@
+import { writeFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import {
   readConfig,
   readState,
   writeState,
   appendLedger,
   intervalToMs,
+  type LedgerEntry,
 } from "../store.js";
 import { extractTranscripts, buildDigest } from "../extract.js";
-import { invokeAgent } from "../agent.js";
+import { invokeAgent, type AgentEntry } from "../agent.js";
 
 /**
  * The main pipeline: extract transcripts, build a digest, invoke the
- * headless agent, and record results. Exits silently when the configured
- * interval hasn't elapsed yet (unless --now is set).
+ * headless agent, validate its response, write files, and record results.
+ * Exits silently when the configured interval hasn't elapsed yet (unless --now).
  */
 export async function runCommand(opts: { now?: boolean }): Promise<void> {
   const config = await readConfig();
@@ -57,7 +61,9 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
   }
 
   if (runResult.entries.length > 0) {
-    await appendLedger(runResult.entries);
+    const written = await writeArtifacts(runResult.entries);
+    const ledgerEntries = toLedgerEntries(written, runResult.runId);
+    await appendLedger(ledgerEntries);
   }
 
   await writeState({
@@ -69,7 +75,7 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
   if (runResult.entries.length === 0) {
     console.log("No new artifacts created.");
   } else {
-    console.log(`Created/edited ${runResult.entries.length} artifact(s):`);
+    console.log(`Wrote ${runResult.entries.length} artifact(s):`);
     for (const e of runResult.entries) {
       console.log(`  ${e.action} ${e.type} (${e.scope}): ${e.path}`);
     }
@@ -83,4 +89,44 @@ async function isIntervalElapsed(interval: string): Promise<boolean> {
   if (!state.lastRunAt) return true;
   const elapsed = Date.now() - new Date(state.lastRunAt).getTime();
   return elapsed >= intervalToMs(interval);
+}
+
+/** Expands ~ to the user's home directory. */
+function expandHome(p: string): string {
+  if (p.startsWith("~/")) {
+    return resolve(homedir(), p.slice(2));
+  }
+  return resolve(p);
+}
+
+/** Writes each artifact's content to disk, creating directories as needed. */
+async function writeArtifacts(entries: AgentEntry[]): Promise<AgentEntry[]> {
+  const written: AgentEntry[] = [];
+
+  for (const entry of entries) {
+    const fullPath = expandHome(entry.path);
+    try {
+      await mkdir(dirname(fullPath), { recursive: true });
+      await writeFile(fullPath, entry.content);
+      written.push(entry);
+      console.log(`  Wrote: ${entry.path}`);
+    } catch (err) {
+      console.error(`  Failed to write ${entry.path}: ${(err as Error).message}`);
+    }
+  }
+
+  return written;
+}
+
+/** Strips content from entries and converts to ledger format. */
+function toLedgerEntries(entries: AgentEntry[], runId: string): LedgerEntry[] {
+  return entries.map((e) => ({
+    runId,
+    date: new Date().toISOString(),
+    type: e.type,
+    scope: e.scope,
+    path: e.path,
+    action: e.action,
+    sourcePattern: e.sourcePattern,
+  }));
 }
