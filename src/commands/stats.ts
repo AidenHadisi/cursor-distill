@@ -14,7 +14,16 @@ export async function statsCommand(opts: { json?: boolean }): Promise<void> {
     return;
   }
 
-  const { byType, byScope, byProject } = groupLedger(ledger);
+  const byType: Record<string, number> = {};
+  const byScope: Record<string, number> = {};
+  const byProject: Record<string, LedgerEntry[]> = {};
+
+  for (const e of ledger) {
+    byType[e.type] = (byType[e.type] ?? 0) + 1;
+    byScope[e.scope] = (byScope[e.scope] ?? 0) + 1;
+    const key = e.scope === "global" ? "(global)" : (e.project ?? "unknown");
+    (byProject[key] ??= []).push(e);
+  }
 
   console.log(`\ncursor-distill stats\n${"=".repeat(40)}\n`);
   console.log(`Total artifacts: ${ledger.length}\n`);
@@ -37,28 +46,7 @@ export async function statsCommand(opts: { json?: boolean }): Promise<void> {
     }
   }
 
-  const runs = new Set(ledger.map((e) => e.runId));
-  console.log(`\n${runs.size} run(s) have produced artifacts.`);
-}
-
-/** Groups ledger entries by type, scope, and project for display. */
-function groupLedger(ledger: LedgerEntry[]): {
-  byType: Record<string, number>;
-  byScope: Record<string, number>;
-  byProject: Record<string, LedgerEntry[]>;
-} {
-  const byType: Record<string, number> = {};
-  const byScope: Record<string, number> = {};
-  const byProject: Record<string, LedgerEntry[]> = {};
-
-  for (const e of ledger) {
-    byType[e.type] = (byType[e.type] ?? 0) + 1;
-    byScope[e.scope] = (byScope[e.scope] ?? 0) + 1;
-
-    const key = e.scope === "global" ? "(global)" : (e.project ?? "unknown");
-    if (!byProject[key]) byProject[key] = [];
-    byProject[key].push(e);
-  }
-
-  return { byType, byScope, byProject };
+  console.log(
+    `\n${new Set(ledger.map((e) => e.runId)).size} run(s) have produced artifacts.`,
+  );
 }

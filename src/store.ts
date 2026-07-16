@@ -5,6 +5,12 @@ import { join } from "node:path";
 
 const DATA_DIR = join(homedir(), ".cursor-distill");
 
+const INTERVAL_MS: Record<string, number> = {
+  d: 86_400_000,
+  h: 3_600_000,
+  m: 60_000,
+};
+
 export interface Config {
   interval: string;
   extractModel: string;
@@ -45,48 +51,30 @@ export async function ensureDataDir(): Promise<void> {
 }
 
 export async function readConfig(): Promise<Config | null> {
-  const p = join(DATA_DIR, "config.json");
-  if (!existsSync(p)) return null;
-  return JSON.parse(await readFile(p, "utf-8"));
+  return readJson<Config | null>(join(DATA_DIR, "config.json"), null);
 }
 
 export async function writeConfig(config: Config): Promise<void> {
-  await ensureDataDir();
-  await writeFile(
-    join(DATA_DIR, "config.json"),
-    JSON.stringify(config, null, 2) + "\n",
-  );
+  await writeJson(join(DATA_DIR, "config.json"), config);
 }
 
 export async function readState(): Promise<WatermarkState> {
-  const p = join(DATA_DIR, "state.json");
-  if (!existsSync(p)) return { projects: {} };
-  return JSON.parse(await readFile(p, "utf-8"));
+  return readJson(join(DATA_DIR, "state.json"), { projects: {} });
 }
 
 export async function writeState(state: WatermarkState): Promise<void> {
-  await ensureDataDir();
-  await writeFile(
-    join(DATA_DIR, "state.json"),
-    JSON.stringify(state, null, 2) + "\n",
-  );
+  await writeJson(join(DATA_DIR, "state.json"), state);
 }
 
 export async function readLedger(): Promise<LedgerEntry[]> {
-  const p = join(DATA_DIR, "ledger.json");
-  if (!existsSync(p)) return [];
-  return JSON.parse(await readFile(p, "utf-8"));
+  return readJson(join(DATA_DIR, "ledger.json"), []);
 }
 
 /** Appends new entries to the ledger, preserving all existing ones. */
 export async function appendLedger(entries: LedgerEntry[]): Promise<void> {
   const existing = await readLedger();
   existing.push(...entries);
-  await ensureDataDir();
-  await writeFile(
-    join(DATA_DIR, "ledger.json"),
-    JSON.stringify(existing, null, 2) + "\n",
-  );
+  await writeJson(join(DATA_DIR, "ledger.json"), existing);
 }
 
 /** Reads a user-editable prompt file, or null if it doesn't exist. */
@@ -111,12 +99,19 @@ export function intervalToMs(interval: string): number {
   if (!match) {
     throw new Error(`Invalid interval: ${interval}. Use e.g. 7d, 12h, 30m`);
   }
-  const n = parseInt(match[1], 10);
-  const unit = match[2];
-  switch (unit) {
-    case "d": return n * 86_400_000;
-    case "h": return n * 3_600_000;
-    case "m": return n * 60_000;
-    default: throw new Error(`Unknown unit: ${unit}`);
+  const unitMs = INTERVAL_MS[match[2]];
+  if (unitMs === undefined) {
+    throw new Error(`Unknown unit: ${match[2]}`);
   }
+  return parseInt(match[1], 10) * unitMs;
+}
+
+async function readJson<T>(path: string, fallback: T): Promise<T> {
+  if (!existsSync(path)) return fallback;
+  return JSON.parse(await readFile(path, "utf-8"));
+}
+
+async function writeJson(path: string, data: unknown): Promise<void> {
+  await ensureDataDir();
+  await writeFile(path, JSON.stringify(data, null, 2) + "\n");
 }

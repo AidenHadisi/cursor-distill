@@ -9,7 +9,7 @@ import {
 } from "./defaultPrompts.js";
 import type { Chunk } from "./extract.js";
 
-const AGENT_CANDIDATES = ["agent", "cursor-agent"];
+const AGENT_CANDIDATES = ["agent", "cursor-agent"] as const;
 
 /** How many extraction agents run at once. */
 const EXTRACT_CONCURRENCY = 4;
@@ -158,6 +158,21 @@ export async function runSynthesis(
 }
 
 /**
+ * Absolute path of the first Cursor agent CLI on PATH, or null if neither
+ * `agent` nor `cursor-agent` is installed.
+ */
+export function resolveAgentCli(): string | null {
+  for (const cmd of AGENT_CANDIDATES) {
+    try {
+      return execSync(`command -v ${cmd}`, { encoding: "utf-8" }).trim();
+    } catch {
+      // continue
+    }
+  }
+  return null;
+}
+
+/**
  * Spawns the Cursor CLI headlessly in read-only mode, writing the prompt
  * to stdin (argv has a 128KB per-argument limit on Linux/WSL2).
  */
@@ -166,7 +181,7 @@ function spawnAgent(
   model: string,
   logPath: string,
 ): Promise<SpawnResult> {
-  const agentCmd = findAgent();
+  const agentCmd = resolveAgentCli() ?? "agent";
   const args = ["-p", "--mode", "ask", "--trust", "--model", model];
 
   return new Promise<SpawnResult>((resolve) => {
@@ -176,7 +191,6 @@ function spawnAgent(
     const proc = spawn(agentCmd, args, {
       cwd: homedir(),
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
     });
 
     proc.stdin.on("error", () => {
@@ -213,19 +227,6 @@ function spawnAgent(
       resolve({ stdout: "", success: false, error: err.message });
     });
   });
-}
-
-/** Resolves the first available Cursor CLI binary on PATH. */
-function findAgent(): string {
-  for (const cmd of AGENT_CANDIDATES) {
-    try {
-      execSync(`command -v ${cmd}`, { stdio: "ignore" });
-      return cmd;
-    } catch {
-      // continue
-    }
-  }
-  return "agent";
 }
 
 /** Assembles the extraction prompt: user rubric + observation contract + chunk. */
@@ -329,37 +330,25 @@ ${JSON.stringify(observations, null, 2)}`;
  * Handles cases where the agent wraps JSON in markdown code fences or adds prose.
  */
 function extractJson(stdout: string): unknown[] | null {
-  // Try the whole string first
-  try {
-    const parsed = JSON.parse(stdout.trim());
-    if (Array.isArray(parsed)) return parsed;
-  } catch {
-    // continue
-  }
+  const candidates = [stdout.trim()];
 
-  // Look for a JSON array in markdown code fences
   const fenceMatch = stdout.match(/```(?:json)?\s*\n(\[[\s\S]*?\])\s*\n```/);
-  if (fenceMatch) {
-    try {
-      const parsed = JSON.parse(fenceMatch[1]);
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      // continue
-    }
-  }
+  if (fenceMatch) candidates.push(fenceMatch[1]);
 
-  // Look for the first [ ... ] block
   const bracketStart = stdout.indexOf("[");
   const bracketEnd = stdout.lastIndexOf("]");
   if (bracketStart !== -1 && bracketEnd > bracketStart) {
-    try {
-      const parsed = JSON.parse(stdout.slice(bracketStart, bracketEnd + 1));
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      // continue
-    }
+    candidates.push(stdout.slice(bracketStart, bracketEnd + 1));
   }
 
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // try next candidate
+    }
+  }
   return null;
 }
 

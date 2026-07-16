@@ -29,12 +29,15 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
     process.exit(1);
   }
 
-  if (!opts.now && !(await isIntervalElapsed(config.interval))) {
-    process.exit(0);
+  const state = await readState();
+  if (!opts.now && state.lastRunAt) {
+    const elapsed = Date.now() - new Date(state.lastRunAt).getTime();
+    if (elapsed < intervalToMs(config.interval)) {
+      process.exit(0);
+    }
   }
 
   console.log("Extracting transcripts...");
-  const state = await readState();
   const result = await extractTranscripts(state);
 
   if (result.messages.length === 0) {
@@ -100,20 +103,9 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
   console.log(`Logs: ~/.cursor-distill/runs/${runId}/`);
 }
 
-/** Returns true if enough time has passed since the last successful run. */
-async function isIntervalElapsed(interval: string): Promise<boolean> {
-  const state = await readState();
-  if (!state.lastRunAt) return true;
-  const elapsed = Date.now() - new Date(state.lastRunAt).getTime();
-  return elapsed >= intervalToMs(interval);
-}
-
 /** Expands ~ to the user's home directory. */
 function expandHome(p: string): string {
-  if (p.startsWith("~/")) {
-    return resolve(homedir(), p.slice(2));
-  }
-  return resolve(p);
+  return p.startsWith("~/") ? resolve(homedir(), p.slice(2)) : resolve(p);
 }
 
 /** Writes each artifact's content to disk, creating directories as needed. */
@@ -142,8 +134,15 @@ function toLedgerEntries(entries: AgentEntry[], runId: string): LedgerEntry[] {
     date: new Date().toISOString(),
     type: e.type,
     scope: e.scope,
+    project: e.scope === "project" ? inferProject(e.path) : undefined,
     path: e.path,
     action: e.action,
     sourcePattern: e.sourcePattern,
   }));
+}
+
+/** Extracts a project name from an artifact path like ~/ezoicgit/funneljam/.cursor/... */
+function inferProject(artifactPath: string): string | undefined {
+  const match = artifactPath.match(/^~\/(.+?)\/\.cursor\//);
+  return match ? match[1] : undefined;
 }

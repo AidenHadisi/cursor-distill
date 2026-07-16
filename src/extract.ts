@@ -166,7 +166,7 @@ export function buildChunks(
 
     for (const m of msgs) {
       const entry = `- ${m.replace(/\n/g, "\n  ")}\n\n`;
-      const entryWords = countWords(entry);
+      const entryWords = entry.split(/\s+/).filter(Boolean).length;
 
       if (wordCount + entryWords > maxWordsPerChunk && count > 0) {
         chunks.push({ project, text, messageCount: count });
@@ -188,22 +188,18 @@ export function buildChunks(
   return chunks;
 }
 
-function countWords(text: string): number {
-  return text.split(/\s+/).filter(Boolean).length;
-}
-
 /** Concatenates text content blocks from a parsed transcript line. */
 function extractFullText(parsed: TranscriptLine): string {
-  if (typeof parsed.message?.content === "string") {
-    return parsed.message.content;
-  }
-  if (Array.isArray(parsed.message?.content)) {
-    return parsed.message!.content
-      .filter((c) => c.type === "text" && c.text)
-      .map((c) => c.text!)
-      .join("\n");
-  }
-  return "";
+  const content = parsed.message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (c): c is { type: string; text: string } =>
+        c.type === "text" && typeof c.text === "string",
+    )
+    .map((c) => c.text)
+    .join("\n");
 }
 
 /**
@@ -211,22 +207,17 @@ function extractFullText(parsed: TranscriptLine): string {
  * system-injected tags stripped when no user_query tags are found.
  */
 function extractUserQueries(text: string): string[] {
-  const regex = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/g;
-  const matches: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = regex.exec(text)) !== null) {
-    const cleaned = m[1].trim();
-    if (cleaned.length > 0) matches.push(cleaned);
+  const fromTags = [...text.matchAll(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/g)]
+    .map((m) => m[1].trim())
+    .filter((s) => s.length > 0);
+  if (fromTags.length > 0) return fromTags;
+
+  let stripped = text;
+  for (const pattern of SYSTEM_TAG_PATTERNS) {
+    stripped = stripped.replace(pattern, "");
   }
-  if (matches.length === 0) {
-    let stripped = text;
-    for (const pattern of SYSTEM_TAG_PATTERNS) {
-      stripped = stripped.replace(pattern, "");
-    }
-    stripped = stripped.trim();
-    if (stripped.length > 5) matches.push(stripped);
-  }
-  return matches;
+  stripped = stripped.trim();
+  return stripped.length > 5 ? [stripped] : [];
 }
 
 /** Recursively finds all .jsonl files under a directory. */

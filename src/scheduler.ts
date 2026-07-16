@@ -7,16 +7,8 @@ const MARKER = "# cursor-distill";
 /** Adds (or replaces) the hourly cron entry that triggers `cursor-distill run`. */
 export function installSchedule(): { installed: boolean; line: string } {
   const cronLine = buildCronLine();
-  let existing = getCrontab();
-
-  if (existing.includes(MARKER)) {
-    existing = existing
-      .split("\n")
-      .filter((l) => !l.includes(MARKER))
-      .join("\n");
-  }
-
-  const trimmed = existing.trimEnd();
+  const withoutOurs = stripMarkerLines(getCrontab());
+  const trimmed = withoutOurs.trimEnd();
   const newCrontab =
     trimmed.length > 0 ? `${trimmed}\n${cronLine}\n` : `${cronLine}\n`;
 
@@ -29,18 +21,20 @@ export function removeSchedule(): boolean {
   const existing = getCrontab();
   if (!existing.includes(MARKER)) return false;
 
-  const filtered = existing
-    .split("\n")
-    .filter((l) => !l.includes(MARKER))
-    .join("\n");
-
-  setCrontab(filtered);
+  setCrontab(stripMarkerLines(existing));
   return true;
 }
 
 /** Checks whether the cron entry is currently registered. */
 export function isScheduleInstalled(): boolean {
   return getCrontab().includes(MARKER);
+}
+
+function stripMarkerLines(crontab: string): string {
+  return crontab
+    .split("\n")
+    .filter((line) => !line.includes(MARKER))
+    .join("\n");
 }
 
 function getCrontab(): string {
@@ -58,6 +52,5 @@ function setCrontab(content: string): void {
 function buildCronLine(): string {
   const currentDir = dirname(fileURLToPath(import.meta.url));
   const cliPath = resolve(currentDir, "cli.js");
-  const nodePath = process.execPath;
-  return `0 * * * * ${nodePath} ${cliPath} run ${MARKER}`;
+  return `0 * * * * ${process.execPath} ${cliPath} run ${MARKER}`;
 }
