@@ -18,15 +18,9 @@ const VALID_TYPES = new Set(["rule", "skill", "subagent"]);
 const VALID_SCOPES = new Set(["global", "project"]);
 const VALID_ACTIONS = new Set(["created", "edited"]);
 
-const VALID_INVOCATIONS = new Set(["user", "agent"]);
-const VALID_CONFIDENCES = new Set(["high", "medium"]);
-
-/** A piece of reusable knowledge extracted from one chunk of messages. */
+/** A condensed summary of user messages from one chunk. */
 export interface Observation {
-  insight: string;
-  typeGuess: "rule" | "skill" | "subagent";
-  invocation: "user" | "agent";
-  confidence: "high" | "medium";
+  summary: string;
   project: string;
   evidence: string[];
 }
@@ -234,7 +228,7 @@ function spawnAgent(
   });
 }
 
-/** Assembles the extraction prompt: user rubric + observation contract + chunk. */
+/** Assembles the extraction prompt: user rubric + compression contract + chunk. */
 function buildExtractPrompt(userPrompt: string, chunk: Chunk): string {
   const mechanics = `
 ---
@@ -242,28 +236,22 @@ function buildExtractPrompt(userPrompt: string, chunk: Chunk): string {
 
 **Do NOT write any files to disk.** Return your entire response as a single JSON array printed to stdout.
 
-Each element is one piece of reusable knowledge you identified:
+Each element is one condensed summary:
 
 \`\`\`json
 [
   {
-    "insight": "User debugs site assignment issues by checking the assignments table in MySQL, then tracing the code path in the sol repo's assignment handler",
-    "typeGuess": "skill",
-    "invocation": "user",
-    "confidence": "high",
+    "summary": "User debugs site assignment issues by first checking the site_assignments table in MySQL for the affected site ID, then tracing the assignment code path in sol/pkg/assignments/handler.go to find where the logic diverges",
     "evidence": ["check the site_assignments table first", "look at sol/pkg/assignments/handler.go for the assignment logic"]
   }
 ]
 \`\`\`
 
 Required fields:
-- **insight**: what the user taught or demonstrated — a clear description of the knowledge
-- **typeGuess**: one of "rule", "skill", "subagent"
-- **invocation**: "user" (default — user triggers when needed) or "agent" (must always be in agent context, only for universal conventions)
-- **confidence**: "high" (clear intentional teaching moment or explicit declaration) or "medium" (reasonable inference from context)
-- **evidence**: 1-5 short excerpts from the user's actual messages showing the knowledge
+- **summary**: a concise rewrite of what the user said, taught, or demonstrated — preserving all substance
+- **evidence**: 1-5 short excerpts from the user's actual messages (direct quotes)
 
-If no reusable knowledge is found, return an empty array: \`[]\`
+If every message is pure filler with no substance, return an empty array: \`[]\`
 
 **Only output the JSON array. No prose before or after.**
 `;
@@ -323,9 +311,9 @@ ${JSON.stringify(ledger.map((e) => ({ type: e.type, scope: e.scope, path: e.path
   return `${userPrompt}
 ${mechanics}
 ---
-# Observations
+# Condensed Summaries
 
-${observations.length} observations extracted from per-project message batches. Each captures a piece of reusable knowledge the user demonstrated or declared. Merge observations that describe the same knowledge (they may be worded differently across projects). Use the "invocation" field to determine \`disable-model-invocation\` (skills) and \`alwaysApply\` (rules). Prefer "user" invocation for skills.
+${observations.length} summaries condensed from per-project message batches. Each preserves the substance of what the user said — no pre-classification has been applied. It is your job to decide what (if anything) is worth turning into an artifact, what type it should be, and how to scope it. Merge summaries that describe the same knowledge across projects.
 
 ${JSON.stringify(observations, null, 2)}`;
 }
@@ -376,26 +364,14 @@ function validateObservations(raw: unknown[], project: string): Observation[] {
     if (typeof item !== "object" || item === null) continue;
     const o = item as Record<string, unknown>;
 
-    if (typeof o.insight !== "string" || o.insight.length === 0) continue;
-    if (typeof o.typeGuess !== "string" || !VALID_TYPES.has(o.typeGuess)) continue;
-    if (!Array.isArray(o.evidence)) continue;
-
-    const invocation =
-      typeof o.invocation === "string" && VALID_INVOCATIONS.has(o.invocation)
-        ? o.invocation
-        : "user";
-    const confidence =
-      typeof o.confidence === "string" && VALID_CONFIDENCES.has(o.confidence)
-        ? o.confidence
-        : "medium";
+    if (typeof o.summary !== "string" || o.summary.length === 0) continue;
 
     valid.push({
-      insight: o.insight,
-      typeGuess: o.typeGuess as Observation["typeGuess"],
-      invocation: invocation as Observation["invocation"],
-      confidence: confidence as Observation["confidence"],
+      summary: o.summary,
       project,
-      evidence: o.evidence.filter((e): e is string => typeof e === "string"),
+      evidence: Array.isArray(o.evidence)
+        ? o.evidence.filter((e): e is string => typeof e === "string")
+        : [],
     });
   }
 

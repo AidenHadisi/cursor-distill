@@ -1,58 +1,34 @@
-export const DEFAULT_EXTRACT_PROMPT = `# Cursor Distill — Knowledge Extraction
+export const DEFAULT_EXTRACT_PROMPT = `# Cursor Distill — Message Compression
 
-You are analyzing a batch of user messages from one project's Cursor agent transcripts. Your job is to identify **reusable knowledge** — anything the user taught, demonstrated, or declared that would save time if captured as a Cursor artifact. You are NOT deciding what to create; a later stage does that. Your job is high-recall extraction.
+You are compressing user messages from Cursor agent transcripts into shorter, clearer summaries. Each summary should preserve the full substance of what the user said or demonstrated, just in fewer words.
 
-**Do not require repetition.** A single detailed debugging walkthrough is a complete skill. A single clear preference declaration is a valid rule. Repetition increases confidence, but absence of repetition does not disqualify.
+**Keep all substance.** Preferences, procedures, corrections, requests, clarifications, explanations, debugging steps, architectural decisions — keep it all. Your job is compression, not filtering. The next stage will decide what matters.
 
-## What to look for
+**Drop only true filler.** Greetings, acknowledgments ("ok", "thanks", "got it"), and empty back-and-forth with no informational content can be dropped.
 
-### 1. Procedures demonstrated (highest value)
-The user walked the agent through a multi-step process: debugging, investigation, deployment, data analysis, operational response. Even a single walkthrough is extremely valuable — it captures domain expertise that would otherwise be lost.
+**Group related messages.** If several messages form a coherent thread (e.g. a multi-step debugging session, a back-and-forth about a design decision), combine them into a single summary that captures the full conversation arc.
 
-Examples: "check this table in the DB, then look at the logs here, then trace the code path in this repo..."
-
-### 2. Preferences and conventions
-The user stated how they want things done, corrected the agent's approach, or declared a standard. A single clear statement is enough.
-
-Examples: "always use camelCase for JSON", "don't add comments that just narrate what the code does", "use this library instead of that one"
-
-### 3. Delegable task templates
-The user asked the agent to perform a self-contained task with a specific methodology, persona, or output format — something that could be packaged as a reusable subagent.
-
-Examples: "research X and present findings in this format", "review this code with these specific criteria"
-
-## Invocation guidance
-
-For each observation, decide whether agents should apply this knowledge autonomously or only when the user explicitly asks:
-
-- **"user"** (default for most things, especially skills): the user would invoke this when needed. Procedures, debugging workflows, operational tasks — these are user-triggered. Prefer "user" to avoid bloating agent context.
-- **"agent"**: agents should always have this in context. Only for universal conventions and preferences that apply to every conversation — coding standards, formatting rules, things the user always corrects.
-
-## What does NOT count
-
-- Ordinary task requests with no transferable knowledge ("fix this bug", "add a button here")
-- Conversational back-and-forth, clarifications, or status updates
-- Knowledge that is obviously project-specific boilerplate with no reuse value
+**Be concise but complete.** A 500-word debugging walkthrough should become 2-3 sentences that preserve every step. A one-line preference statement can stay roughly as-is.
 `;
 
 export const DEFAULT_SYNTHESIZE_PROMPT = `# Cursor Distill — Artifact Synthesis
 
-You are given a list of observations — reusable knowledge extracted from a user's Cursor agent transcripts across many projects. Your job is to decide which observations genuinely warrant a Cursor artifact, then write those artifacts.
+You are given condensed summaries of a user's messages from Cursor agent transcripts across many projects. Your job is to identify which summaries contain reusable knowledge, then write Cursor artifacts for them.
 
-**Quality over quantity.** Only create an artifact when the observation captures genuinely reusable knowledge — something the user would benefit from having automated. A single high-confidence observation is enough; do not require multiple sightings.
+**Quality over quantity.** Only create an artifact when a summary captures genuinely reusable knowledge — something the user would benefit from having automated or documented. A single clear instance is enough; do not require multiple sightings.
 
-## Evaluating observations
+## Evaluating summaries
 
-For each observation (or group of related observations), ask:
+For each summary (or group of related summaries), ask:
 1. **Is this reusable?** Would the user encounter this situation again? A debugging procedure for a production system = yes. A one-off config tweak = no.
-2. **Is there enough detail?** Does the evidence contain enough substance to write a useful artifact, or is it too vague?
+2. **Is there enough detail?** Does the summary contain enough substance to write a useful artifact, or is it too vague?
 3. **Does it already exist?** Check the ledger of previously created artifacts.
 
-When multiple observations describe the same knowledge (possibly worded differently across projects), merge them. Use breadth (distinct projects) to decide scope: knowledge appearing in 3+ projects is likely global; otherwise project-scoped.
+When multiple summaries describe the same knowledge (possibly worded differently across projects), merge them. Use breadth (distinct projects) to decide scope: knowledge appearing in 3+ projects is likely global; otherwise project-scoped.
 
 ## When to create what
 
-You MUST consider all three artifact types. Do not default to rules for everything — observations tagged as "skill" should produce skills, not rules. A multi-step procedure is a skill, not a rule.
+You MUST consider all three artifact types. Do not default to rules for everything. A multi-step procedure is a skill, not a rule.
 
 ### Rules — for preferences, conventions, and corrections
 Short, declarative instructions agents always follow. Use rules for things that can be stated in 1-5 lines.
@@ -60,15 +36,15 @@ Short, declarative instructions agents always follow. Use rules for things that 
 - **Project rule**: \`<project>/.cursor/rules/<name>.mdc\`
 - **Global rule**: \`~/.cursor/rules/<name>.mdc\`
 
-Use \`alwaysApply: true\` when the observation's invocation is "agent" (the convention applies to every conversation). Use \`globs:\` when the rule only applies to specific file types.
+Use \`alwaysApply: true\` when the preference applies to every conversation. Use \`globs:\` when the rule only applies to specific file types.
 
 ### Skills — for multi-step workflows and procedures
-Skills are the most valuable artifact type. Any observation describing a debugging procedure, investigation workflow, operational runbook, setup sequence, or multi-step process MUST become a skill — not a rule. Skills capture *how* to do something step by step.
+Skills are the most valuable artifact type. Any summary describing a debugging procedure, investigation workflow, operational runbook, setup sequence, or multi-step process MUST become a skill — not a rule. Skills capture *how* to do something step by step.
 
 - **Project skill**: \`<project>/.cursor/skills/<name>/SKILL.md\`
 - **Global skill**: \`~/.cursor/skills/<name>/SKILL.md\`
 
-**Skills default to \`disable-model-invocation: true\`** — they are user-invokable to avoid bloating model context. Only omit this flag if the skill truly needs to be in every conversation's context.
+**Skills default to \`disable-model-invocation: true\`** — they are user-invokable to avoid bloating model context. Only omit this flag if the skill truly needs to be in every conversation's context (rare).
 
 Write skills with enough detail that an agent can follow the procedure autonomously: which databases/tables to check, which repos to look at, which commands to run, what to look for at each step.
 
