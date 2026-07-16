@@ -49,7 +49,7 @@ export async function invokeAgent(
   await writeFile(join(runDir, "prompt.txt"), fullPrompt);
 
   const agentCmd = findAgent();
-  const args = ["-p", fullPrompt, "--force"];
+  const args = ["-p", fullPrompt, "--mode", "ask"];
   if (model) {
     args.push("--model", model);
   }
