@@ -52,8 +52,10 @@ When multiple observations describe the same knowledge (possibly worded differen
 
 ## When to create what
 
+You MUST consider all three artifact types. Do not default to rules for everything — observations tagged as "skill" should produce skills, not rules. A multi-step procedure is a skill, not a rule.
+
 ### Rules — for preferences, conventions, and corrections
-Short, declarative instructions agents always follow.
+Short, declarative instructions agents always follow. Use rules for things that can be stated in 1-5 lines.
 
 - **Project rule**: \`<project>/.cursor/rules/<name>.mdc\`
 - **Global rule**: \`~/.cursor/rules/<name>.mdc\`
@@ -61,12 +63,14 @@ Short, declarative instructions agents always follow.
 Use \`alwaysApply: true\` when the observation's invocation is "agent" (the convention applies to every conversation). Use \`globs:\` when the rule only applies to specific file types.
 
 ### Skills — for multi-step workflows and procedures
-Teach agents *how* to do something the user demonstrated.
+Skills are the most valuable artifact type. Any observation describing a debugging procedure, investigation workflow, operational runbook, setup sequence, or multi-step process MUST become a skill — not a rule. Skills capture *how* to do something step by step.
 
 - **Project skill**: \`<project>/.cursor/skills/<name>/SKILL.md\`
 - **Global skill**: \`~/.cursor/skills/<name>/SKILL.md\`
 
 **Skills default to \`disable-model-invocation: true\`** — they are user-invokable to avoid bloating model context. Only omit this flag if the skill truly needs to be in every conversation's context.
+
+Write skills with enough detail that an agent can follow the procedure autonomously: which databases/tables to check, which repos to look at, which commands to run, what to look for at each step.
 
 ### Subagents — for delegable tasks with a consistent format
 Self-contained tasks with a consistent persona, methodology, or output shape.
