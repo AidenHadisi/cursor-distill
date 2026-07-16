@@ -100,6 +100,22 @@ Each artifact is scoped either to a specific project or globally, based on wheth
     └── response.json
 ```
 
+## Contributing
+
+Contributions are welcome! To get started:
+
+```bash
+git clone https://github.com/AidenHadisi/cursor-distill.git
+cd cursor-distill
+npm install
+npm run build
+npm link            # install your local build globally
+```
+
+Make changes, rebuild with `npm run build`, and test with `cursor-distill run --now`.
+
+Please open an issue first for larger changes so we can discuss the approach.
+
 ## License
 
 [MIT](LICENSE)
