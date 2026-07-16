@@ -1,0 +1,49 @@
+{
+  "name": "cursor-distill",
+  "version": "0.1.0",
+  "description": "Automatically distill your Cursor agent transcripts into rules, skills, and subagents",
+  "author": "Aiden Hadisi <aiden@hadisi.com> (https://github.com/AidenHadisi)",
+  "license": "MIT",
+  "homepage": "https://github.com/AidenHadisi/cursor-distill#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AidenHadisi/cursor-distill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AidenHadisi/cursor-distill/issues"
+  },
+  "type": "module",
+  "bin": {
+    "cursor-distill": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "cursor",
+    "cursor-ide",
+    "ai",
+    "agent",
+    "rules",
+    "skills",
+    "subagents",
+    "transcripts",
+    "automation",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}
