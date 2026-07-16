@@ -320,7 +320,7 @@ ${JSON.stringify(observations, null, 2)}`;
 
 /**
  * Extracts the first valid JSON array from the agent's stdout.
- * Shortens a project slug like "Users-aidenhadisi-ezoicgit-funneljam" to "funneljam".
+ * Shortens a project slug like "Users-jane-projects-myapp" to "projects-myapp".
  */
 function truncateProject(slug: string): string {
   const parts = slug.split("-");

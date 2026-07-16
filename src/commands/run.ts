@@ -141,7 +141,7 @@ function toLedgerEntries(entries: AgentEntry[], runId: string): LedgerEntry[] {
   }));
 }
 
-/** Extracts a project name from an artifact path like ~/ezoicgit/funneljam/.cursor/... */
+/** Extracts a project name from an artifact path like ~/projects/myapp/.cursor/... */
 function inferProject(artifactPath: string): string | undefined {
   const match = artifactPath.match(/^~\/(.+?)\/\.cursor\//);
   return match ? match[1] : undefined;
