@@ -75,10 +75,16 @@ export async function runExtraction(
       const logPath = join(runDir, `extract-${index}.log`);
       const prompt = buildExtractPrompt(userPrompt, chunk);
 
+      console.log(
+        `  [${index + 1}/${chunks.length}] ${chunk.project} (${chunk.messageCount} messages)...`,
+      );
+      const start = Date.now();
       const result = await spawnAgent(prompt, model, logPath);
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+
       if (!result.success) {
         console.warn(
-          `  Chunk ${index} (${chunk.project}) failed: ${result.error} — skipped`,
+          `  [${index + 1}/${chunks.length}] FAILED (${elapsed}s): ${result.error} — skipped`,
         );
         continue;
       }
@@ -86,7 +92,7 @@ export async function runExtraction(
       const parsed = extractJson(result.stdout);
       if (parsed === null) {
         console.warn(
-          `  Chunk ${index} (${chunk.project}) returned no valid JSON — skipped`,
+          `  [${index + 1}/${chunks.length}] no valid JSON (${elapsed}s) — skipped`,
         );
         continue;
       }
@@ -94,7 +100,7 @@ export async function runExtraction(
       const valid = validateObservations(parsed, chunk.project);
       observations.push(...valid);
       console.log(
-        `  Chunk ${index} (${chunk.project}): ${valid.length} observation(s)`,
+        `  [${index + 1}/${chunks.length}] done (${elapsed}s): ${valid.length} observation(s)`,
       );
     }
   }
@@ -127,10 +133,16 @@ export async function runSynthesis(
   const prompt = await buildSynthesizePrompt(userPrompt, observations);
   await writeFile(join(runDir, "synthesize-prompt.txt"), prompt);
 
+  console.log(`  Analyzing ${observations.length} observation(s)...`);
+  const start = Date.now();
   const result = await spawnAgent(prompt, model, join(runDir, "synthesize.log"));
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+
   if (!result.success) {
+    console.error(`  FAILED (${elapsed}s): ${result.error}`);
     return { entries: [], success: false, error: result.error };
   }
+  console.log(`  Synthesis complete (${elapsed}s).`);
 
   const parsed = extractJson(result.stdout);
   if (parsed === null) {
