@@ -21,6 +21,7 @@ import {
   runSingleChunk,
   saveObservations,
   runSynthesis,
+  killActiveAgents,
   type AgentEntry,
 } from "../agent.js";
 import {
@@ -57,9 +58,25 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
     process.exit(0);
   }
 
+  // Ctrl+C: kill agent children, release lock, exit. Second Ctrl+C force-exits.
+  let interrupting = false;
+  const onInterrupt = (): void => {
+    if (interrupting) {
+      process.exit(130);
+    }
+    interrupting = true;
+    console.log(`\n${c.warn("Interrupted — stopping agents...")}`);
+    killActiveAgents();
+    void releaseRunLock().finally(() => process.exit(130));
+  };
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onInterrupt);
+
   try {
     await runPipeline(config, state);
   } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onInterrupt);
     await releaseRunLock();
   }
 }

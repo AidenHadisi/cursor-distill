@@ -1,4 +1,4 @@
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,21 @@ const AGENT_TIMEOUT_MS = 15 * 60 * 1000;
 const KILL_GRACE_MS = 10_000;
 
 let cachedAgentPath: string | null | undefined;
+
+/** Live agent subprocesses — killed on Ctrl+C so they don't outlive the CLI. */
+const activeAgents = new Set<ChildProcess>();
+
+/** SIGTERM all in-flight agent children (used by the SIGINT handler). */
+export function killActiveAgents(): void {
+  for (const proc of activeAgents) {
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      // already dead
+    }
+  }
+  activeAgents.clear();
+}
 
 const VALID_TYPES = new Set(["rule", "skill", "subagent"]);
 const VALID_SCOPES = new Set(["global", "project"]);
@@ -190,6 +205,7 @@ function spawnAgent(
     function finish(result: SpawnResult): void {
       if (settled) return;
       settled = true;
+      activeAgents.delete(proc);
       clearTimeout(timer);
       clearTimeout(killTimer);
       writeFile(logPath, buildLog(result, stdout, stderr)).catch(() => {});
@@ -200,6 +216,7 @@ function spawnAgent(
       cwd: homedir(),
       stdio: ["pipe", "pipe", "pipe"],
     });
+    activeAgents.add(proc);
 
     proc.stdin.on("error", () => {});
     proc.stdin.write(prompt);
