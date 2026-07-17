@@ -1,4 +1,5 @@
 import { readLedger, type LedgerEntry } from "../store.js";
+import { c } from "../ui.js";
 
 /** Prints a breakdown of all artifacts created by cursor-distill. */
 export async function statsCommand(opts: { json?: boolean }): Promise<void> {
@@ -10,7 +11,7 @@ export async function statsCommand(opts: { json?: boolean }): Promise<void> {
   }
 
   if (ledger.length === 0) {
-    console.log("No artifacts created yet. Run: cursor-distill run --now");
+    console.log(c.dim("No artifacts created yet. Run: cursor-distill run --now"));
     return;
   }
 
@@ -25,28 +26,29 @@ export async function statsCommand(opts: { json?: boolean }): Promise<void> {
     (byProject[key] ??= []).push(e);
   }
 
-  console.log(`\ncursor-distill stats\n${"=".repeat(40)}\n`);
-  console.log(`Total artifacts: ${ledger.length}\n`);
+  console.log(`\n${c.bold("cursor-distill stats")}\n${"─".repeat(40)}\n`);
+  console.log(`Total artifacts: ${c.bold(String(ledger.length))}\n`);
 
-  console.log("By type:");
+  console.log(c.bold("By type:"));
   for (const [type, count] of Object.entries(byType)) {
-    console.log(`  ${type}: ${count}`);
+    console.log(`  ${c.info(type)}: ${count}`);
   }
 
-  console.log("\nBy scope:");
+  console.log(`\n${c.bold("By scope:")}`);
   for (const [scope, count] of Object.entries(byScope)) {
-    console.log(`  ${scope}: ${count}`);
+    console.log(`  ${c.info(scope)}: ${count}`);
   }
 
-  console.log("\nBy location:");
+  console.log(`\n${c.bold("By location:")}`);
   for (const [project, entries] of Object.entries(byProject).sort()) {
-    console.log(`\n  ${project}:`);
+    console.log(`\n  ${c.bold(project)}:`);
     for (const e of entries) {
-      console.log(`    ${e.action} ${e.type}: ${e.path}`);
+      const prefix = e.action === "created" ? c.success("+") : c.warn("~");
+      console.log(`    ${prefix} ${e.type}: ${c.dim(e.path)}`);
     }
   }
 
   console.log(
-    `\n${new Set(ledger.map((e) => e.runId)).size} run(s) have produced artifacts.`,
+    `\n${c.dim(`${new Set(ledger.map((e) => e.runId)).size} run(s) have produced artifacts.`)}`,
   );
 }

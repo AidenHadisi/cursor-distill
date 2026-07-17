@@ -17,7 +17,19 @@ import {
   type WatermarkState,
 } from "../store.js";
 import { extractTranscripts, buildChunks } from "../extract.js";
-import { runExtraction, runSynthesis, type AgentEntry } from "../agent.js";
+import {
+  runSingleChunk,
+  saveObservations,
+  runSynthesis,
+  type AgentEntry,
+} from "../agent.js";
+import {
+  c,
+  sym,
+  runExtractionTasks,
+  withSynthesisSpinner,
+  printRunSummary,
+} from "../ui.js";
 
 /**
  * The main pipeline: extract transcripts, chunk them per project, run the
@@ -28,9 +40,7 @@ import { runExtraction, runSynthesis, type AgentEntry } from "../agent.js";
 export async function runCommand(opts: { now?: boolean }): Promise<void> {
   const config = await readConfig();
   if (!config) {
-    console.error(
-      "Error: cursor-distill not initialized. Run: cursor-distill init",
-    );
+    console.error(c.error("Error: cursor-distill not initialized. Run: cursor-distill init"));
     process.exit(1);
   }
 
@@ -43,7 +53,7 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
   }
 
   if (!(await acquireRunLock())) {
-    console.log("Another cursor-distill run is already active. Exiting.");
+    console.log(c.warn("Another cursor-distill run is already active. Exiting."));
     process.exit(0);
   }
 
@@ -59,47 +69,50 @@ async function runPipeline(config: Config, state: WatermarkState): Promise<void>
   const result = await extractTranscripts(state, config);
 
   if (result.messages.length === 0) {
-    console.log("No new transcripts since last run.");
+    console.log(c.dim("No new transcripts since last run."));
     await writeState({ ...state, lastRunAt: new Date().toISOString() });
     return;
   }
 
   const chunks = buildChunks(result);
+  const projectCount = Object.keys(result.projectCounts).length;
   console.log(
-    `Found ${result.messages.length} user messages -> ${chunks.length} chunk(s) across ${Object.keys(result.projectCounts).length} projects.`,
+    `Found ${c.bold(String(result.messages.length))} messages → ${c.bold(String(chunks.length))} chunk(s) across ${c.bold(String(projectCount))} project(s).`,
   );
 
   const runId = randomUUID().slice(0, 8);
   const runDir = join(dataDir(), "runs", runId);
   await mkdir(runDir, { recursive: true });
 
-  console.log(`\nStage 1: extracting patterns (${config.extractModel})...`);
-  const observations = await runExtraction(chunks, config.extractModel, runDir, config.agentPath);
-  console.log(`Extraction complete: ${observations.length} observation(s).`);
+  const observations = await runExtractionTasks(
+    chunks,
+    config.extractModel,
+    (chunk, index) =>
+      runSingleChunk(chunk, index, config.extractModel, runDir, config.agentPath),
+  );
+
+  await saveObservations(observations, runDir);
+  console.log(`Extraction complete: ${c.bold(String(observations.length))} observation(s).`);
 
   if (observations.length === 0) {
     await writeState({
       projects: result.newWatermarks,
       lastRunAt: new Date().toISOString(),
     });
-    console.log(`\nRun ${runId} complete. No patterns found.`);
+    printRunSummary(runId, []);
     return;
   }
 
-  console.log(`\nStage 2: synthesizing artifacts (${config.synthesizeModel})...`);
-  const synthesis = await runSynthesis(
-    observations,
+  const synthesis = await withSynthesisSpinner(
+    observations.length,
     config.synthesizeModel,
-    runDir,
-    config.agentPath,
+    () => runSynthesis(observations, config.synthesizeModel, runDir, config.agentPath),
   );
 
   if (!synthesis.success) {
-    console.error(`Synthesis failed: ${synthesis.error}`);
-    console.error(`Logs: ~/.cursor-distill/runs/${runId}/`);
-    // Advance lastRunAt so failed runs don't retry every hourly cron tick.
+    console.error(c.error(`Synthesis failed: ${synthesis.error}`));
+    console.error(c.dim(`Logs: ~/.cursor-distill/runs/${runId}/`));
     await writeState({ ...state, lastRunAt: new Date().toISOString() });
-    // Set exitCode and return so runCommand's finally can release the lock.
     process.exitCode = 1;
     return;
   }
@@ -116,16 +129,7 @@ async function runPipeline(config: Config, state: WatermarkState): Promise<void>
     lastRunAt: new Date().toISOString(),
   });
 
-  console.log(`\nRun ${runId} complete.`);
-  if (written.length === 0) {
-    console.log("No new artifacts created.");
-  } else {
-    console.log(`Wrote ${written.length} artifact(s):`);
-    for (const e of written) {
-      console.log(`  ${e.action} ${e.type} (${e.scope}): ${e.path}`);
-    }
-  }
-  console.log(`Logs: ~/.cursor-distill/runs/${runId}/`);
+  printRunSummary(runId, written);
 }
 
 /** Expands ~ to the user's home directory and resolves. */
@@ -201,7 +205,7 @@ async function writeArtifacts(entries: AgentEntry[], runDir: string): Promise<Ag
   for (const entry of entries) {
     const check = validateArtifactPath(entry);
     if ("rejected" in check) {
-      console.warn(`  Skipped ${entry.path}: ${check.rejected}`);
+      console.warn(`  ${sym.cross} Skipped ${entry.path}: ${c.warn(check.rejected)}`);
       continue;
     }
     const { fullPath } = check;
@@ -217,9 +221,8 @@ async function writeArtifacts(entries: AgentEntry[], runDir: string): Promise<Ag
       await mkdir(dirname(fullPath), { recursive: true });
       await writeFile(fullPath, entry.content);
       written.push(entry);
-      console.log(`  Wrote: ${entry.path}`);
     } catch (err) {
-      console.error(`  Failed to write ${entry.path}: ${(err as Error).message}`);
+      console.error(`  ${sym.cross} Failed to write ${entry.path}: ${c.error((err as Error).message)}`);
     }
   }
 

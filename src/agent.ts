@@ -12,9 +12,6 @@ import { resolveAllProjectSlugs } from "./extract.js";
 
 const AGENT_CANDIDATES = ["agent", "cursor-agent"] as const;
 
-/** How many extraction agents run at once. */
-const EXTRACT_CONCURRENCY = 4;
-
 /** Per-agent subprocess deadline (15 minutes). */
 const AGENT_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -32,6 +29,13 @@ export interface Observation {
   summary: string;
   project: string;
   evidence: string[];
+}
+
+/** Result of extracting a single chunk — observations on success, error otherwise. */
+export interface ChunkOutcome {
+  observations: Observation[];
+  elapsed: string;
+  error?: string;
 }
 
 /** A single artifact proposed by the synthesis stage, including file content. */
@@ -57,63 +61,51 @@ interface SpawnResult {
   error?: string;
 }
 
-/**
- * Stage 1: runs the extraction model over every chunk with bounded
- * concurrency. Failed or unparseable chunks are skipped with a warning —
- * extraction is lossy by design; synthesis is where strictness matters.
- */
-export async function runExtraction(
-  chunks: Chunk[],
+/** Caches the extract prompt so parallel chunk calls don't re-read the file. */
+let cachedExtractPrompt: string | undefined;
+
+/** Runs extraction on a single chunk. Failed or unparseable chunks return an error and no observations. */
+export async function runSingleChunk(
+  chunk: Chunk,
+  index: number,
   model: string,
   runDir: string,
   agentPath?: string,
-): Promise<Observation[]> {
-  const userPrompt = (await readPromptFile("extract")) ?? DEFAULT_EXTRACT_PROMPT;
-  const observations: Observation[] = [];
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < chunks.length) {
-      const index = nextIndex++;
-      const chunk = chunks[index];
-      const logPath = join(runDir, `extract-${index}.log`);
-      const prompt = buildExtractPrompt(userPrompt, chunk);
-
-      const name = truncateProject(chunk.project);
-      console.log(`  [started] ${name} (${chunk.messageCount} messages)`);
-      const start = Date.now();
-      const result = await spawnAgent(prompt, model, logPath, agentPath);
-      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-
-      if (!result.success) {
-        console.warn(`  [failed]  ${name} — ${result.error} (${elapsed}s)`);
-        continue;
-      }
-
-      const parsed = parseAgentOutput(result.stdout);
-      if (parsed === null) {
-        console.warn(`  [failed]  ${name} — no valid JSON (${elapsed}s)`);
-        continue;
-      }
-
-      const valid = validateObservations(parsed, chunk.project);
-      observations.push(...valid);
-      console.log(`  [done]    ${name} → ${valid.length} observation(s) (${elapsed}s)`);
-    }
+): Promise<ChunkOutcome> {
+  if (cachedExtractPrompt === undefined) {
+    cachedExtractPrompt = (await readPromptFile("extract")) ?? DEFAULT_EXTRACT_PROMPT;
   }
 
-  const workers = Array.from(
-    { length: Math.min(EXTRACT_CONCURRENCY, chunks.length) },
-    () => worker(),
-  );
-  await Promise.all(workers);
+  const logPath = join(runDir, `extract-${index}.log`);
+  const prompt = buildExtractPrompt(cachedExtractPrompt, chunk);
+  const start = Date.now();
+  const result = await spawnAgent(prompt, model, logPath, agentPath);
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
+  if (!result.success) {
+    return { elapsed, error: result.error, observations: [] };
+  }
+
+  const parsed = parseAgentOutput(result.stdout);
+  if (parsed === null) {
+    return { elapsed, error: "no valid JSON", observations: [] };
+  }
+
+  return {
+    elapsed,
+    observations: validateObservations(parsed, chunk.project),
+  };
+}
+
+/** Writes collected observations to the run directory. */
+export async function saveObservations(
+  observations: Observation[],
+  runDir: string,
+): Promise<void> {
   await writeFile(
     join(runDir, "observations.json"),
     JSON.stringify(observations, null, 2),
   );
-
-  return observations;
 }
 
 /**
@@ -131,16 +123,11 @@ export async function runSynthesis(
   const prompt = await buildSynthesizePrompt(userPrompt, observations);
   await writeFile(join(runDir, "synthesize-prompt.txt"), prompt);
 
-  console.log(`  Analyzing ${observations.length} observation(s)...`);
-  const start = Date.now();
   const result = await spawnAgent(prompt, model, join(runDir, "synthesize.log"), agentPath);
-  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
   if (!result.success) {
-    console.error(`  FAILED (${elapsed}s): ${result.error}`);
     return { entries: [], success: false, error: result.error };
   }
-  console.log(`  Synthesis complete (${elapsed}s).`);
 
   const parsed = parseAgentOutput(result.stdout);
   if (parsed === null) {
@@ -362,12 +349,6 @@ ${mechanics}
 ${observations.length} summaries condensed from per-project message batches. Each preserves the substance of what the user said — no pre-classification has been applied. It is your job to decide what (if anything) is worth turning into an artifact, what type it should be, and how to scope it. Merge summaries that describe the same knowledge across projects.
 
 ${JSON.stringify(observations, null, 2)}`;
-}
-
-/** Shortens a project slug like "Users-jane-projects-myapp" to "projects-myapp". */
-function truncateProject(slug: string): string {
-  const parts = slug.split("-");
-  return parts.length > 2 ? parts.slice(2).join("-") : slug;
 }
 
 /**
