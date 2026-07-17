@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 
 const MARKER = "# cursor-distill";
 
@@ -49,8 +50,13 @@ function setCrontab(content: string): void {
   execSync("crontab -", { input: content, encoding: "utf-8" });
 }
 
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function buildCronLine(): string {
   const currentDir = dirname(fileURLToPath(import.meta.url));
   const cliPath = resolve(currentDir, "cli.js");
-  return `0 * * * * ${process.execPath} ${cliPath} run ${MARKER}`;
+  const logPath = join(homedir(), ".cursor-distill", "cron.log");
+  return `0 * * * * ${shellQuote(process.execPath)} ${shellQuote(cliPath)} run >> ${shellQuote(logPath)} 2>&1 ${MARKER}`;
 }

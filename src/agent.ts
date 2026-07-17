@@ -8,11 +8,20 @@ import {
   DEFAULT_SYNTHESIZE_PROMPT,
 } from "./defaultPrompts.js";
 import type { Chunk } from "./extract.js";
+import { resolveAllProjectSlugs } from "./extract.js";
 
 const AGENT_CANDIDATES = ["agent", "cursor-agent"] as const;
 
 /** How many extraction agents run at once. */
 const EXTRACT_CONCURRENCY = 4;
+
+/** Per-agent subprocess deadline (15 minutes). */
+const AGENT_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Grace period between SIGTERM and SIGKILL. */
+const KILL_GRACE_MS = 10_000;
+
+let cachedAgentPath: string | null | undefined;
 
 const VALID_TYPES = new Set(["rule", "skill", "subagent"]);
 const VALID_SCOPES = new Set(["global", "project"]);
@@ -57,6 +66,7 @@ export async function runExtraction(
   chunks: Chunk[],
   model: string,
   runDir: string,
+  agentPath?: string,
 ): Promise<Observation[]> {
   const userPrompt = (await readPromptFile("extract")) ?? DEFAULT_EXTRACT_PROMPT;
   const observations: Observation[] = [];
@@ -72,7 +82,7 @@ export async function runExtraction(
       const name = truncateProject(chunk.project);
       console.log(`  [started] ${name} (${chunk.messageCount} messages)`);
       const start = Date.now();
-      const result = await spawnAgent(prompt, model, logPath);
+      const result = await spawnAgent(prompt, model, logPath, agentPath);
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
       if (!result.success) {
@@ -80,7 +90,7 @@ export async function runExtraction(
         continue;
       }
 
-      const parsed = extractJson(result.stdout);
+      const parsed = parseAgentOutput(result.stdout);
       if (parsed === null) {
         console.warn(`  [failed]  ${name} — no valid JSON (${elapsed}s)`);
         continue;
@@ -108,12 +118,13 @@ export async function runExtraction(
 
 /**
  * Stage 2: runs the synthesis model once over all observations.
- * Validation is strict — any invalid entry aborts the run with no writes.
+ * Invalid entries are dropped with a warning; valid ones are kept.
  */
 export async function runSynthesis(
   observations: Observation[],
   model: string,
   runDir: string,
+  agentPath?: string,
 ): Promise<SynthesisResult> {
   const userPrompt =
     (await readPromptFile("synthesize")) ?? DEFAULT_SYNTHESIZE_PROMPT;
@@ -122,7 +133,7 @@ export async function runSynthesis(
 
   console.log(`  Analyzing ${observations.length} observation(s)...`);
   const start = Date.now();
-  const result = await spawnAgent(prompt, model, join(runDir, "synthesize.log"));
+  const result = await spawnAgent(prompt, model, join(runDir, "synthesize.log"), agentPath);
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
   if (!result.success) {
@@ -131,7 +142,7 @@ export async function runSynthesis(
   }
   console.log(`  Synthesis complete (${elapsed}s).`);
 
-  const parsed = extractJson(result.stdout);
+  const parsed = parseAgentOutput(result.stdout);
   if (parsed === null) {
     return {
       entries: [],
@@ -141,13 +152,6 @@ export async function runSynthesis(
   }
 
   const validated = validateEntries(parsed);
-  if (validated === null) {
-    return {
-      entries: [],
-      success: false,
-      error: "Synthesis returned entries with missing or invalid fields",
-    };
-  }
 
   await writeFile(
     join(runDir, "response.json"),
@@ -158,74 +162,106 @@ export async function runSynthesis(
 
 /**
  * Absolute path of the first Cursor agent CLI on PATH, or null if neither
- * `agent` nor `cursor-agent` is installed.
+ * `agent` nor `cursor-agent` is installed. Result is cached after first call.
  */
 export function resolveAgentCli(): string | null {
+  if (cachedAgentPath !== undefined) return cachedAgentPath;
   for (const cmd of AGENT_CANDIDATES) {
     try {
-      return execSync(`command -v ${cmd}`, { encoding: "utf-8" }).trim();
+      cachedAgentPath = execSync(`command -v ${cmd}`, { encoding: "utf-8" }).trim();
+      return cachedAgentPath;
     } catch {
       // continue
     }
   }
+  cachedAgentPath = null;
   return null;
 }
 
 /**
  * Spawns the Cursor CLI headlessly in read-only mode, writing the prompt
  * to stdin (argv has a 128KB per-argument limit on Linux/WSL2).
+ * Enforces AGENT_TIMEOUT_MS; sends SIGTERM then SIGKILL after a grace period.
  */
 function spawnAgent(
   prompt: string,
   model: string,
   logPath: string,
+  agentPath?: string,
 ): Promise<SpawnResult> {
-  const agentCmd = resolveAgentCli() ?? "agent";
-  const args = ["-p", "--mode", "ask", "--trust", "--model", model];
+  const agentCmd = agentPath ?? resolveAgentCli() ?? "agent";
+  const args = ["-p", "--mode", "ask", "--trust", "--output-format", "json", "--model", model];
 
   return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function finish(result: SpawnResult): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      writeFile(logPath, buildLog(result, stdout, stderr)).catch(() => {});
+      resolve(result);
+    }
 
     const proc = spawn(agentCmd, args, {
       cwd: homedir(),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    proc.stdin.on("error", () => {
-      // Child exited before reading all input; close handler reports it.
-    });
+    proc.stdin.on("error", () => {});
     proc.stdin.write(prompt);
     proc.stdin.end();
 
-    proc.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+    proc.stdout.setEncoding("utf-8");
+    proc.stderr.setEncoding("utf-8");
+
+    proc.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
     });
 
-    proc.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+    proc.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
     });
 
-    proc.on("close", async (code) => {
-      const log = `EXIT CODE: ${code}\n\n--- STDOUT ---\n${stdout}\n\n--- STDERR ---\n${stderr}`;
-      await writeFile(logPath, log);
+    // On timeout: SIGTERM, then SIGKILL after grace. Resolve only on close so
+    // finish() does not clear the kill timer before SIGKILL can fire.
+    timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+      killTimer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+    }, AGENT_TIMEOUT_MS);
 
-      if (code !== 0) {
-        resolve({
+    proc.on("close", (code) => {
+      if (timedOut) {
+        finish({
           stdout,
           success: false,
-          error: `Agent exited with code ${code}`,
+          error: `Agent timed out after ${AGENT_TIMEOUT_MS / 1000}s`,
         });
         return;
       }
-      resolve({ stdout, success: true });
+      finish(
+        code !== 0
+          ? { stdout, success: false, error: `Agent exited with code ${code}` }
+          : { stdout, success: true },
+      );
     });
 
-    proc.on("error", async (err) => {
-      await writeFile(logPath, `SPAWN ERROR: ${err.message}`);
-      resolve({ stdout: "", success: false, error: err.message });
+    proc.on("error", (err) => {
+      finish({ stdout: "", success: false, error: err.message });
     });
   });
+}
+
+function buildLog(result: SpawnResult, stdout: string, stderr: string): string {
+  const status = result.success ? "OK" : `FAILED: ${result.error}`;
+  return `STATUS: ${status}\n\n--- STDOUT ---\n${stdout}\n\n--- STDERR ---\n${stderr}`;
 }
 
 /** Assembles the extraction prompt: user rubric + compression contract + chunk. */
@@ -271,6 +307,9 @@ async function buildSynthesizePrompt(
 ): Promise<string> {
   const ledger = await readLedger();
 
+  const slugs = [...new Set(observations.map((o) => o.project))];
+  const slugMap = resolveAllProjectSlugs(slugs);
+
   const mechanics = `
 ---
 ## System Instructions (non-negotiable)
@@ -304,6 +343,13 @@ If nothing warrants creation, return an empty array: \`[]\`
 
 **Do not write any files yourself. Do not create directories. Only output the JSON array.**
 
+### Project workspace resolution
+
+Use this pre-resolved mapping for project-scoped artifact paths — do NOT attempt your own slug decoding:
+${JSON.stringify(slugMap, null, 2)}
+
+Slugs not listed above could not be resolved to an existing directory. Do not create project-scoped artifacts for unresolved slugs.
+
 Previously created artifacts (check before duplicating):
 ${JSON.stringify(ledger.map((e) => ({ type: e.type, scope: e.scope, path: e.path })), null, 2)}
 `;
@@ -318,19 +364,17 @@ ${observations.length} summaries condensed from per-project message batches. Eac
 ${JSON.stringify(observations, null, 2)}`;
 }
 
-/**
- * Extracts the first valid JSON array from the agent's stdout.
- * Shortens a project slug like "Users-jane-projects-myapp" to "projects-myapp".
- */
+/** Shortens a project slug like "Users-jane-projects-myapp" to "projects-myapp". */
 function truncateProject(slug: string): string {
   const parts = slug.split("-");
   return parts.length > 2 ? parts.slice(2).join("-") : slug;
 }
 
 /**
- * Handles cases where the agent wraps JSON in markdown code fences or adds prose.
+ * Extracts the first valid JSON array from agent text.
+ * Handles markdown fences and surrounding prose.
  */
-function extractJson(stdout: string): unknown[] | null {
+export function extractJson(stdout: string): unknown[] | null {
   const candidates = [stdout.trim()];
 
   const fenceMatch = stdout.match(/```(?:json)?\s*\n(\[[\s\S]*?\])\s*\n```/);
@@ -351,6 +395,29 @@ function extractJson(stdout: string): unknown[] | null {
     }
   }
   return null;
+}
+
+/**
+ * Parses Cursor CLI `--output-format json` stdout.
+ * Envelope shape: `{ "type": "result", "result": "<model text>" }`.
+ * Falls back to raw extractJson when the envelope is absent (older CLI).
+ */
+export function parseAgentOutput(stdout: string): unknown[] | null {
+  try {
+    const envelope = JSON.parse(stdout);
+    if (
+      typeof envelope === "object" &&
+      envelope !== null &&
+      !Array.isArray(envelope) &&
+      envelope.type === "result" &&
+      typeof envelope.result === "string"
+    ) {
+      return extractJson(envelope.result);
+    }
+  } catch {
+    // Not a JSON envelope — fall through to raw parse.
+  }
+  return extractJson(stdout);
 }
 
 /**
@@ -378,22 +445,44 @@ function validateObservations(raw: unknown[], project: string): Observation[] {
   return valid;
 }
 
-/** Validates that every entry has the required fields with correct types and values. */
-function validateEntries(raw: unknown[]): AgentEntry[] | null {
-  if (raw.length === 0) return [];
-
+/**
+ * Validates entries leniently — invalid items are dropped with a warning,
+ * valid ones kept. Mirrors the lenient approach used in validateObservations.
+ */
+function validateEntries(raw: unknown[]): AgentEntry[] {
   const validated: AgentEntry[] = [];
 
   for (const item of raw) {
-    if (typeof item !== "object" || item === null) return null;
+    if (typeof item !== "object" || item === null) {
+      console.warn("  Dropped synthesis entry: not an object");
+      continue;
+    }
     const e = item as Record<string, unknown>;
 
-    if (typeof e.type !== "string" || !VALID_TYPES.has(e.type)) return null;
-    if (typeof e.scope !== "string" || !VALID_SCOPES.has(e.scope)) return null;
-    if (typeof e.action !== "string" || !VALID_ACTIONS.has(e.action)) return null;
-    if (typeof e.path !== "string" || e.path.length === 0) return null;
-    if (typeof e.content !== "string" || e.content.length === 0) return null;
-    if (typeof e.sourcePattern !== "string") return null;
+    if (typeof e.type !== "string" || !VALID_TYPES.has(e.type)) {
+      console.warn(`  Dropped synthesis entry: invalid type "${String(e.type)}"`);
+      continue;
+    }
+    if (typeof e.scope !== "string" || !VALID_SCOPES.has(e.scope)) {
+      console.warn(`  Dropped synthesis entry: invalid scope "${String(e.scope)}"`);
+      continue;
+    }
+    if (typeof e.action !== "string" || !VALID_ACTIONS.has(e.action)) {
+      console.warn(`  Dropped synthesis entry: invalid action "${String(e.action)}"`);
+      continue;
+    }
+    if (typeof e.path !== "string" || e.path.length === 0) {
+      console.warn("  Dropped synthesis entry: missing path");
+      continue;
+    }
+    if (typeof e.content !== "string" || e.content.length === 0) {
+      console.warn(`  Dropped synthesis entry: missing content for ${e.path}`);
+      continue;
+    }
+    if (typeof e.sourcePattern !== "string") {
+      console.warn(`  Dropped synthesis entry: missing sourcePattern for ${e.path}`);
+      continue;
+    }
 
     validated.push({
       type: e.type as AgentEntry["type"],

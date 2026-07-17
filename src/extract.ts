@@ -1,9 +1,9 @@
 import { readFile, readdir, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import type { WatermarkState } from "./store.js";
+import { matchesProjectFilter, type WatermarkState, type ProjectFilter } from "./store.js";
 
 const CURSOR_PROJECTS_DIR = join(homedir(), ".cursor", "projects");
 
@@ -56,6 +56,7 @@ interface TranscriptLine {
  */
 export async function extractTranscripts(
   watermarks: WatermarkState,
+  filter?: ProjectFilter,
 ): Promise<DigestResult> {
   if (!existsSync(CURSOR_PROJECTS_DIR)) {
     return { messages: [], newWatermarks: {}, projectCounts: {} };
@@ -71,6 +72,8 @@ export async function extractTranscripts(
   for (const projectDir of projectDirs) {
     if (!projectDir.isDirectory()) continue;
     const projectSlug = projectDir.name;
+
+    if (filter !== undefined && !matchesProjectFilter(projectSlug, filter)) continue;
     const transcriptsDir = join(
       CURSOR_PROJECTS_DIR,
       projectSlug,
@@ -218,6 +221,54 @@ function extractUserQueries(text: string): string[] {
   }
   stripped = stripped.trim();
   return stripped.length > 5 ? [stripped] : [];
+}
+
+/**
+ * Resolves a Cursor project slug (e.g. "Users-aidenhadisi-ezoicgit-cursor-distill")
+ * back to its filesystem path ("/Users/aidenhadisi/ezoicgit/cursor-distill") using
+ * greedy directory probing. Returns null when the slug can't be resolved.
+ *
+ * Cursor encodes '/' as '-', which is lossy when directory names contain hyphens.
+ * We walk from the filesystem root, at each level trying the longest hyphen-joined
+ * token run that names an existing directory, then falling back to shorter runs.
+ */
+export function resolveProjectSlug(slug: string): string | null {
+  return probe("/", slug.split("-"), 0);
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Longest-first greedy walk: at each level try the longest hyphen-joined token run. */
+function probe(base: string, tokens: string[], index: number): string | null {
+  if (index >= tokens.length) return base;
+
+  for (let end = tokens.length; end > index; end--) {
+    const full = join(base, tokens.slice(index, end).join("-"));
+    if (!isDirectory(full)) continue;
+    if (end === tokens.length) return full;
+    const result = probe(full, tokens, end);
+    if (result !== null) return result;
+  }
+  return null;
+}
+
+/**
+ * Builds a slug → absolute path mapping for all project directories.
+ * Exported for injection into the synthesis prompt.
+ */
+export function resolveAllProjectSlugs(slugs: string[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const slug of slugs) {
+    const resolved = resolveProjectSlug(slug);
+    if (resolved) map[slug] = resolved;
+  }
+  return map;
 }
 
 /** Recursively finds all .jsonl files under a directory. */

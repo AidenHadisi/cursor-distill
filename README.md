@@ -48,6 +48,14 @@ cursor-distill init \
 | `--interval <duration>` | `7d` | How often to run (e.g. `7d`, `3d`, `12h`) |
 | `--extract-model <slug>` | `gemini-3.5-flash` | Fast model for knowledge extraction |
 | `--synthesize-model <slug>` | `claude-opus-4-8-thinking-high` | Smart model for artifact synthesis |
+| `--include <pattern>` | _(all)_ | Only process matching project slugs (repeatable, `*` wildcards) |
+| `--ignore <pattern>` | _(none)_ | Skip matching project slugs (repeatable, `*` wildcards, wins over include) |
+
+Filter by project slug (the directory name under `~/.cursor/projects/`):
+
+```bash
+cursor-distill init --include "*ezoicgit-*" --ignore "*test*" --ignore "*scratch*"
+```
 
 ## Custom Prompts
 
@@ -87,9 +95,11 @@ Each artifact is scoped either to a specific project or globally, based on wheth
 
 ```
 ~/.cursor-distill/
-├── config.json        # interval, models
+├── config.json        # interval, models, filters, agent path
 ├── state.json         # per-project watermarks
 ├── ledger.json        # artifact log (powers stats + dedup)
+├── run.lock           # PID lockfile (prevents concurrent runs)
+├── cron.log           # output from scheduled runs
 ├── prompts/
 │   ├── extract.md     # extraction rubric (edit this)
 │   └── synthesize.md  # synthesis rubric (edit this)
@@ -97,7 +107,8 @@ Each artifact is scoped either to a specific project or globally, based on wheth
     ├── extract-*.log  # per-chunk extraction logs
     ├── observations.json
     ├── synthesize.log
-    └── response.json
+    ├── response.json
+    └── backups/       # pre-edit artifact snapshots
 ```
 
 ## Contributing
@@ -112,7 +123,11 @@ npm run build
 npm link            # install your local build globally
 ```
 
-Make changes, rebuild with `npm run build`, and test with `cursor-distill run --now`.
+Make changes, rebuild with `npm run build`, and run tests:
+
+```bash
+npm test
+```
 
 Please open an issue first for larger changes so we can discuss the approach.
 

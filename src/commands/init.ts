@@ -21,6 +21,8 @@ export async function initCommand(opts: {
   interval: string;
   extractModel: string;
   synthesizeModel: string;
+  include: string[];
+  ignore: string[];
 }): Promise<void> {
   try {
     intervalToMs(opts.interval);
@@ -45,16 +47,30 @@ export async function initCommand(opts: {
   await syncPrompt("synthesize", DEFAULT_SYNTHESIZE_PROMPT);
 
   const existing = await readConfig();
+
+  // Preserve existing filter lists when flags aren't passed.
+  const includeProjects = opts.include.length > 0 ? opts.include : existing?.includeProjects;
+  const ignoreProjects = opts.ignore.length > 0 ? opts.ignore : existing?.ignoreProjects;
+
   const config: Config = {
     interval: opts.interval,
     extractModel: opts.extractModel,
     synthesizeModel: opts.synthesizeModel,
+    agentPath,
+    ...(includeProjects?.length ? { includeProjects } : {}),
+    ...(ignoreProjects?.length ? { ignoreProjects } : {}),
     createdAt: existing?.createdAt ?? new Date().toISOString(),
   };
   await writeConfig(config);
   console.log(
     `  Config saved (interval: ${opts.interval}, extract: ${opts.extractModel}, synthesize: ${opts.synthesizeModel})`,
   );
+  if (includeProjects?.length) {
+    console.log(`  Include projects: ${includeProjects.join(", ")}`);
+  }
+  if (ignoreProjects?.length) {
+    console.log(`  Ignore projects: ${ignoreProjects.join(", ")}`);
+  }
 
   try {
     const { line } = installSchedule();

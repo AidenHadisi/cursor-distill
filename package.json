@@ -1,6 +1,6 @@
 {
   "name": "cursor-distill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Automatically distill your Cursor agent transcripts into rules, skills, and subagents",
   "author": "Aiden Hadisi <aiden@hadisi.com> (https://github.com/AidenHadisi)",
   "license": "MIT",
@@ -19,10 +19,13 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "test": "tsc && node --test dist/test/*.test.js",
+    "prepublishOnly": "npm run build"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/test"
   ],
   "keywords": [
     "cursor",

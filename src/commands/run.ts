@@ -1,4 +1,5 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, copyFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -9,7 +10,11 @@ import {
   appendLedger,
   intervalToMs,
   dataDir,
+  acquireRunLock,
+  releaseRunLock,
+  type Config,
   type LedgerEntry,
+  type WatermarkState,
 } from "../store.js";
 import { extractTranscripts, buildChunks } from "../extract.js";
 import { runExtraction, runSynthesis, type AgentEntry } from "../agent.js";
@@ -37,8 +42,21 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
     }
   }
 
+  if (!(await acquireRunLock())) {
+    console.log("Another cursor-distill run is already active. Exiting.");
+    process.exit(0);
+  }
+
+  try {
+    await runPipeline(config, state);
+  } finally {
+    await releaseRunLock();
+  }
+}
+
+async function runPipeline(config: Config, state: WatermarkState): Promise<void> {
   console.log("Extracting transcripts...");
-  const result = await extractTranscripts(state);
+  const result = await extractTranscripts(state, config);
 
   if (result.messages.length === 0) {
     console.log("No new transcripts since last run.");
@@ -56,7 +74,7 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
   await mkdir(runDir, { recursive: true });
 
   console.log(`\nStage 1: extracting patterns (${config.extractModel})...`);
-  const observations = await runExtraction(chunks, config.extractModel, runDir);
+  const observations = await runExtraction(chunks, config.extractModel, runDir, config.agentPath);
   console.log(`Extraction complete: ${observations.length} observation(s).`);
 
   if (observations.length === 0) {
@@ -73,16 +91,23 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
     observations,
     config.synthesizeModel,
     runDir,
+    config.agentPath,
   );
 
   if (!synthesis.success) {
     console.error(`Synthesis failed: ${synthesis.error}`);
     console.error(`Logs: ~/.cursor-distill/runs/${runId}/`);
-    process.exit(1);
+    // Advance lastRunAt so failed runs don't retry every hourly cron tick.
+    await writeState({ ...state, lastRunAt: new Date().toISOString() });
+    // Set exitCode and return so runCommand's finally can release the lock.
+    process.exitCode = 1;
+    return;
   }
 
-  if (synthesis.entries.length > 0) {
-    const written = await writeArtifacts(synthesis.entries);
+  const written = synthesis.entries.length > 0
+    ? await writeArtifacts(synthesis.entries, runDir)
+    : [];
+  if (written.length > 0) {
     await appendLedger(toLedgerEntries(written, runId));
   }
 
@@ -92,29 +117,103 @@ export async function runCommand(opts: { now?: boolean }): Promise<void> {
   });
 
   console.log(`\nRun ${runId} complete.`);
-  if (synthesis.entries.length === 0) {
+  if (written.length === 0) {
     console.log("No new artifacts created.");
   } else {
-    console.log(`Wrote ${synthesis.entries.length} artifact(s):`);
-    for (const e of synthesis.entries) {
+    console.log(`Wrote ${written.length} artifact(s):`);
+    for (const e of written) {
       console.log(`  ${e.action} ${e.type} (${e.scope}): ${e.path}`);
     }
   }
   console.log(`Logs: ~/.cursor-distill/runs/${runId}/`);
 }
 
-/** Expands ~ to the user's home directory. */
+/** Expands ~ to the user's home directory and resolves. */
 function expandHome(p: string): string {
   return p.startsWith("~/") ? resolve(homedir(), p.slice(2)) : resolve(p);
 }
 
-/** Writes each artifact's content to disk, creating directories as needed. */
-async function writeArtifacts(entries: AgentEntry[]): Promise<AgentEntry[]> {
+const ALLOWED_SUBDIRS = ["rules", "skills", "agents"] as const;
+const DOT_CURSOR = "/.cursor/";
+
+/** True when `rel` is exactly an allowed subdir or a path beneath one. */
+function isAllowedCursorRel(rel: string): boolean {
+  return ALLOWED_SUBDIRS.some((sub) => rel === sub || rel.startsWith(`${sub}/`));
+}
+
+/**
+ * Validates that an artifact path is inside an allowed `.cursor/` subtree and
+ * passes action-specific existence checks.
+ * Returns `{ fullPath }` on success or `{ rejected }` with a reason.
+ */
+export function validateArtifactPath(
+  entry: AgentEntry,
+): { fullPath: string } | { rejected: string } {
+  // Reject before resolve() so ".." cannot be normalised away.
+  if (entry.path.includes("..")) {
+    return { rejected: "path traversal detected" };
+  }
+
+  const fullPath = expandHome(entry.path);
+  const cursorIdx = fullPath.lastIndexOf(DOT_CURSOR);
+  if (cursorIdx === -1) {
+    return {
+      rejected: entry.scope === "project"
+        ? "project-scoped path missing /.cursor/ segment"
+        : "path is outside allowed .cursor/{rules,skills,agents}/ trees",
+    };
+  }
+
+  const afterCursor = fullPath.slice(cursorIdx + DOT_CURSOR.length);
+  if (!isAllowedCursorRel(afterCursor)) {
+    return { rejected: "path is outside allowed .cursor/{rules,skills,agents}/ trees" };
+  }
+  if (!afterCursor.includes("/") && !afterCursor.includes(".")) {
+    return { rejected: "path points to a directory, not a file" };
+  }
+
+  if (entry.scope === "global") {
+    const globalPrefix = join(homedir(), ".cursor") + "/";
+    if (!fullPath.startsWith(globalPrefix)) {
+      return { rejected: "path is outside allowed .cursor/{rules,skills,agents}/ trees" };
+    }
+  } else {
+    const projectRoot = fullPath.slice(0, cursorIdx);
+    if (!existsSync(projectRoot)) {
+      return { rejected: `project root does not exist: ${projectRoot}` };
+    }
+  }
+
+  if (entry.action === "created" && existsSync(fullPath)) {
+    return { rejected: "file already exists (refusing action:created overwrite)" };
+  }
+  if (entry.action === "edited" && !existsSync(fullPath)) {
+    return { rejected: "file does not exist (cannot edit a nonexistent artifact)" };
+  }
+
+  return { fullPath };
+}
+
+/** Writes each artifact's content to disk after sandbox validation. */
+async function writeArtifacts(entries: AgentEntry[], runDir: string): Promise<AgentEntry[]> {
   const written: AgentEntry[] = [];
 
   for (const entry of entries) {
-    const fullPath = expandHome(entry.path);
+    const check = validateArtifactPath(entry);
+    if ("rejected" in check) {
+      console.warn(`  Skipped ${entry.path}: ${check.rejected}`);
+      continue;
+    }
+    const { fullPath } = check;
+
     try {
+      if (entry.action === "edited") {
+        const backupDir = join(runDir, "backups");
+        await mkdir(backupDir, { recursive: true });
+        const safeName = entry.path.replace(/[/\\]/g, "_");
+        await copyFile(fullPath, join(backupDir, safeName));
+      }
+
       await mkdir(dirname(fullPath), { recursive: true });
       await writeFile(fullPath, entry.content);
       written.push(entry);
@@ -141,8 +240,10 @@ function toLedgerEntries(entries: AgentEntry[], runId: string): LedgerEntry[] {
   }));
 }
 
-/** Extracts a project name from an artifact path like ~/projects/myapp/.cursor/... */
+/** Extracts a project directory from an artifact path like ~/projects/myapp/.cursor/... */
 function inferProject(artifactPath: string): string | undefined {
-  const match = artifactPath.match(/^~\/(.+?)\/\.cursor\//);
-  return match ? match[1] : undefined;
+  const expanded = expandHome(artifactPath);
+  const idx = expanded.lastIndexOf(DOT_CURSOR);
+  if (idx === -1) return undefined;
+  return expanded.slice(0, idx);
 }

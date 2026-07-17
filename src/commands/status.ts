@@ -18,6 +18,17 @@ export async function statusCommand(): Promise<void> {
   console.log(`Synthesize model: ${config.synthesizeModel}`);
   console.log(`Initialized: ${config.createdAt}`);
 
+  if (config.includeProjects?.length || config.ignoreProjects?.length) {
+    if (config.includeProjects?.length) {
+      console.log(`Include projects: ${config.includeProjects.join(", ")}`);
+    }
+    if (config.ignoreProjects?.length) {
+      console.log(`Ignore projects: ${config.ignoreProjects.join(", ")}`);
+    }
+  } else {
+    console.log("Project filter: all projects");
+  }
+
   const scheduled = isScheduleInstalled();
   console.log(`\nCron schedule: ${scheduled ? "installed" : "NOT installed"}`);
 

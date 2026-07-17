@@ -14,7 +14,12 @@ program
   .description(
     "Distill your Cursor agent transcripts into rules, skills, and subagents"
   )
-  .version("0.1.0");
+  .version("0.2.0");
+
+function collect(val: string, acc: string[]): string[] {
+  acc.push(val);
+  return acc;
+}
 
 program
   .command("init")
@@ -30,6 +35,8 @@ program
     "smart model for artifact synthesis",
     "claude-opus-4-8-thinking-high",
   )
+  .option("--include <pattern>", "only process matching project slugs (repeatable)", collect, [])
+  .option("--ignore <pattern>", "skip matching project slugs (repeatable)", collect, [])
   .action(initCommand);
 
 program
@@ -55,4 +62,4 @@ program
   .option("--purge", "also delete ~/.cursor-distill/")
   .action(uninstallCommand);
 
-program.parse();
+program.parseAsync();

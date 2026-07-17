@@ -65,8 +65,5 @@ You are a Cursor agent — read existing rules, skills, and agents in the user's
 
 ## Project workspace resolution
 
-Project slugs follow the pattern \`Users-<user>-<path-segments>\`. To resolve:
-- Replace \`Users-<user>-\` with the home directory
-- Replace remaining \`-\` with path separators
-- Example: \`Users-jane-projects-myapp\` → \`~/projects/myapp\`
+A pre-resolved slug-to-path mapping is provided in the system instructions. Use it directly — do not attempt your own slug decoding.
 `;
